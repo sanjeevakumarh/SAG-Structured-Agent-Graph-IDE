@@ -1,0 +1,14 @@
+# Build outputs
+**/bin/
+**/obj/
+**/Debug/
+**/debug/
+**/out/
+
+# Logs
+**/logs/
+**/log/
+*.log
+
+# Node
+**/node_modules/

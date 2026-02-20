@@ -1,0 +1,355 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using Microsoft.Extensions.Logging;
+using SAGIDE.Core.DTOs;
+using SAGIDE.Core.Models;
+using SAGIDE.Service.Communication.Messages;
+using SAGIDE.Service.Orchestrator;
+using SAGIDE.Service.ActivityLogging;
+
+namespace SAGIDE.Service.Communication;
+
+public class MessageHandler
+{
+    private readonly AgentOrchestrator _orchestrator;
+    private readonly ActivityLogger _activityLogger;
+    private readonly GitIntegration _gitIntegration;
+    private readonly Infrastructure.GitConfig? _gitConfig;
+    private readonly WorkflowEngine _workflowEngine;
+    private readonly ILogger<MessageHandler> _logger;
+    private static readonly JsonSerializerOptions JsonOptions = NamedPipeServer.JsonOptions;
+
+    public MessageHandler(AgentOrchestrator orchestrator, ActivityLogger activityLogger,
+        GitIntegration gitIntegration, WorkflowEngine workflowEngine,
+        ILogger<MessageHandler> logger,
+        Infrastructure.GitConfig? gitConfig = null)
+    {
+        _orchestrator = orchestrator;
+        _activityLogger = activityLogger;
+        _gitIntegration = gitIntegration;
+        _workflowEngine = workflowEngine;
+        _gitConfig = gitConfig;
+        _logger = logger;
+    }
+
+    private static T Deserialize<T>(byte[] bytes) => JsonSerializer.Deserialize<T>(bytes, JsonOptions)!;
+    private static byte[] Serialize<T>(T value) => JsonSerializer.SerializeToUtf8Bytes(value, JsonOptions);
+
+    public async Task<PipeMessage> HandleAsync(PipeMessage message, CancellationToken ct)
+    {
+        try
+        {
+            return message.Type switch
+            {
+                MessageTypes.Ping => new PipeMessage { Type = MessageTypes.Pong, RequestId = message.RequestId },
+                MessageTypes.SubmitTask => await HandleSubmitTask(message, ct),
+                MessageTypes.CancelTask => await HandleCancelTask(message, ct),
+                MessageTypes.GetTaskStatus => HandleGetTaskStatus(message),
+                MessageTypes.GetAllTasks => HandleGetAllTasks(message),
+                MessageTypes.ApproveTask => await HandleApproveTask(message, ct),
+                MessageTypes.GetDlq => HandleGetDlq(message),
+                MessageTypes.RetryDlq => await HandleRetryDlq(message, ct),
+                MessageTypes.DiscardDlq => HandleDiscardDlq(message),
+                MessageTypes.InitializeActivityLog => await HandleInitializeActivityLog(message, ct),
+                MessageTypes.GetActivityConfig => await HandleGetActivityConfig(message, ct),
+                MessageTypes.UpdateActivityConfig => await HandleUpdateActivityConfig(message, ct),
+                MessageTypes.GetActivityHours => await HandleGetActivityHours(message, ct),
+                MessageTypes.GetActivityByHour => await HandleGetActivityByHour(message, ct),
+                MessageTypes.SyncGitHistory => await HandleSyncGitHistory(message, ct),
+                MessageTypes.GenerateCommitMessage => await HandleGenerateCommitMessage(message, ct),
+                MessageTypes.ToggleGitAutoCommit => HandleToggleGitAutoCommit(message),
+                // Workflow orchestration
+                MessageTypes.StartWorkflow         => await HandleStartWorkflow(message, ct),
+                MessageTypes.GetWorkflows          => HandleGetWorkflows(message),
+                MessageTypes.GetWorkflowInstances  => HandleGetWorkflowInstances(message),
+                MessageTypes.CancelWorkflow        => await HandleCancelWorkflow(message, ct),
+                MessageTypes.PauseWorkflow         => await HandlePauseWorkflow(message, ct),
+                MessageTypes.ResumeWorkflow        => await HandleResumeWorkflow(message, ct),
+                MessageTypes.UpdateWorkflowContext => await HandleUpdateWorkflowContext(message, ct),
+                _ => CreateError(message.RequestId, $"Unknown message type: {message.Type}")
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error handling message type: {Type}", message.Type);
+            return CreateError(message.RequestId, ex.Message);
+        }
+    }
+
+    private PipeMessage HandleToggleGitAutoCommit(PipeMessage message)
+    {
+        if (_gitConfig is null)
+        {
+            return CreateError(message.RequestId, "Git config not available");
+        }
+
+        var req = Deserialize<Dictionary<string, JsonElement>>(message.Payload!);
+        var enabled = req.TryGetValue("enabled", out var el) && el.GetBoolean();
+        _gitConfig.AutoCommitResults = enabled;
+        _logger.LogInformation("Git auto-commit {State}", enabled ? "enabled" : "disabled");
+
+        return new PipeMessage
+        {
+            Type = MessageTypes.ActivityResponse,
+            RequestId = message.RequestId,
+            Payload = Serialize(new Dictionary<string, string> { ["enabled"] = enabled.ToString().ToLowerInvariant() })
+        };
+    }
+
+    private async Task<PipeMessage> HandleSubmitTask(PipeMessage message, CancellationToken ct)
+    {
+        var request = Deserialize<SubmitTaskRequest>(message.Payload!);
+        var metadata = request.Metadata ?? [];
+        if (!string.IsNullOrEmpty(request.ModelEndpoint))
+            metadata["modelEndpoint"] = request.ModelEndpoint;
+
+        var task = new AgentTask
+        {
+            AgentType = request.AgentType, ModelProvider = request.ModelProvider, ModelId = request.ModelId,
+            Description = request.Description, FilePaths = request.FilePaths, Priority = request.Priority,
+            Metadata = metadata,
+            ScheduledFor = request.ScheduledFor,
+            ComparisonGroupId = request.ComparisonGroupId,
+        };
+        var taskId = await _orchestrator.SubmitTaskAsync(task, ct);
+        var response = new TaskStatusResponse
+        {
+            TaskId = taskId, Status = AgentTaskStatus.Queued, AgentType = task.AgentType,
+            ModelProvider = task.ModelProvider, ModelId = task.ModelId, CreatedAt = task.CreatedAt
+        };
+        return new PipeMessage { Type = MessageTypes.TaskUpdate, RequestId = message.RequestId, Payload = Serialize(response) };
+    }
+
+    private async Task<PipeMessage> HandleCancelTask(PipeMessage message, CancellationToken ct)
+    {
+        var taskId = Deserialize<string>(message.Payload!);
+        await _orchestrator.CancelTaskAsync(taskId, ct);
+        return new PipeMessage
+        {
+            Type = MessageTypes.TaskUpdate, RequestId = message.RequestId,
+            Payload = Serialize(new TaskStatusResponse { TaskId = taskId, Status = AgentTaskStatus.Cancelled })
+        };
+    }
+
+    private PipeMessage HandleGetTaskStatus(PipeMessage message)
+    {
+        var taskId = Deserialize<string>(message.Payload!);
+        var status = _orchestrator.GetTaskStatus(taskId);
+        return new PipeMessage { Type = MessageTypes.TaskUpdate, RequestId = message.RequestId,
+            Payload = status is not null ? Serialize(status) : null };
+    }
+
+    private PipeMessage HandleGetAllTasks(PipeMessage message) =>
+        new() { Type = MessageTypes.TaskUpdate, RequestId = message.RequestId, Payload = Serialize(_orchestrator.GetAllTasks()) };
+
+    private async Task<PipeMessage> HandleApproveTask(PipeMessage message, CancellationToken ct)
+    {
+        var approval = Deserialize<ApprovalRequest>(message.Payload!);
+        await _orchestrator.ApproveTaskAsync(approval.TaskId, approval.Approved, ct);
+        return new PipeMessage { Type = MessageTypes.TaskUpdate, RequestId = message.RequestId };
+    }
+
+    private PipeMessage HandleGetDlq(PipeMessage message)
+    {
+        var entries = _orchestrator.DLQ.GetAll();
+        return new PipeMessage
+        {
+            Type = MessageTypes.DlqResponse, RequestId = message.RequestId,
+            Payload = Serialize(entries.Select(e => new Dictionary<string, string>
+            {
+                ["id"] = e.Id, ["originalTaskId"] = e.OriginalTaskId,
+                ["agentType"] = e.AgentType.ToString(), ["modelProvider"] = e.ModelProvider.ToString(),
+                ["modelId"] = e.ModelId, ["error"] = e.ErrorMessage, ["errorCode"] = e.ErrorCode ?? "",
+                ["failedAt"] = e.FailedAt.ToString("O"), ["retryCount"] = e.RetryCount.ToString()
+            }).ToList())
+        };
+    }
+
+    private async Task<PipeMessage> HandleRetryDlq(PipeMessage message, CancellationToken ct)
+    {
+        var dlqId = Deserialize<string>(message.Payload!);
+        var newTaskId = await _orchestrator.RetryFromDlqAsync(dlqId, ct);
+        var payload = newTaskId is not null
+            ? new Dictionary<string, string> { ["retried"] = "true", ["newTaskId"] = newTaskId }
+            : new Dictionary<string, string> { ["retried"] = "false", ["error"] = "DLQ entry not found" };
+        return new PipeMessage { Type = MessageTypes.DlqResponse, RequestId = message.RequestId, Payload = Serialize(payload) };
+    }
+
+    private PipeMessage HandleDiscardDlq(PipeMessage message)
+    {
+        var dlqId = Deserialize<string>(message.Payload!);
+        var discarded = _orchestrator.DLQ.Discard(dlqId);
+        return new PipeMessage
+        {
+            Type = MessageTypes.DlqResponse, RequestId = message.RequestId,
+            Payload = Serialize(new Dictionary<string, string>
+                { ["discarded"] = discarded.ToString().ToLowerInvariant(), ["dlqId"] = dlqId })
+        };
+    }
+
+    // Activity log handlers — TypeScript sends typed objects, not plain strings
+
+    private async Task<PipeMessage> HandleInitializeActivityLog(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<Dictionary<string, JsonElement>>(message.Payload!);
+        var workspacePath = req["workspacePath"].GetString()!;
+        await _activityLogger.InitializeWorkspaceAsync(workspacePath, ct);
+        return new PipeMessage { Type = MessageTypes.ActivityResponse, RequestId = message.RequestId,
+            Payload = Serialize(new Dictionary<string, string> { ["initialized"] = "true", ["workspacePath"] = workspacePath }) };
+    }
+
+    private async Task<PipeMessage> HandleGetActivityConfig(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<Dictionary<string, JsonElement>>(message.Payload!);
+        var workspacePath = req["workspacePath"].GetString()!;
+        var config = await _activityLogger.GetConfigAsync(workspacePath, ct);
+        return new PipeMessage { Type = MessageTypes.ActivityResponse, RequestId = message.RequestId,
+            Payload = config != null ? Serialize(config) : null };
+    }
+
+    private async Task<PipeMessage> HandleUpdateActivityConfig(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<Dictionary<string, JsonElement>>(message.Payload!);
+        var config = JsonSerializer.Deserialize<ActivityLogConfig>(req["config"].GetRawText(), JsonOptions)!;
+        await _activityLogger.UpdateConfigAsync(config, ct);
+        return new PipeMessage { Type = MessageTypes.ActivityResponse, RequestId = message.RequestId,
+            Payload = Serialize(new Dictionary<string, string> { ["updated"] = "true" }) };
+    }
+
+    private async Task<PipeMessage> HandleGetActivityHours(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<Dictionary<string, JsonElement>>(message.Payload!);
+        var workspacePath = req["workspacePath"].GetString()!;
+        var limit = req.TryGetValue("limit", out var limitEl) ? limitEl.GetInt32() : 100;
+        var hourBuckets = await _activityLogger.GetHourBucketsAsync(workspacePath, limit, ct);
+        return new PipeMessage { Type = MessageTypes.ActivityResponse, RequestId = message.RequestId, Payload = Serialize(hourBuckets) };
+    }
+
+    private async Task<PipeMessage> HandleGetActivityByHour(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<Dictionary<string, JsonElement>>(message.Payload!);
+        var workspacePath = req["workspacePath"].GetString()!;
+        var hourBucket = req["hourBucket"].GetString()!;
+        var activities = await _activityLogger.GetActivitiesByHourAsync(workspacePath, hourBucket, ct);
+        return new PipeMessage { Type = MessageTypes.ActivityResponse, RequestId = message.RequestId, Payload = Serialize(activities) };
+    }
+
+    private async Task<PipeMessage> HandleSyncGitHistory(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<Dictionary<string, JsonElement>>(message.Payload!);
+        var workspacePath = req["workspacePath"].GetString()!;
+        DateTime? since = req.TryGetValue("sinceDays", out var dEl) ? DateTime.UtcNow.AddDays(-dEl.GetInt32()) : null;
+        await _gitIntegration.SyncFromGitHistoryAsync(workspacePath, since, ct);
+        return new PipeMessage { Type = MessageTypes.ActivityResponse, RequestId = message.RequestId,
+            Payload = Serialize(new Dictionary<string, string> { ["synced"] = "true" }) };
+    }
+
+    private async Task<PipeMessage> HandleGenerateCommitMessage(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<Dictionary<string, JsonElement>>(message.Payload!);
+        var workspacePath = req["workspacePath"].GetString()!;
+        DateTime? since = req.TryGetValue("sinceDays", out var dEl) ? DateTime.UtcNow.AddDays(-dEl.GetInt32()) : null;
+        var msg = await _gitIntegration.GenerateCommitMessageAsync(workspacePath, since, ct);
+        // Wrap in an object so the client receives { message: string } rather than a bare JSON string.
+        return new PipeMessage { Type = MessageTypes.ActivityResponse, RequestId = message.RequestId,
+            Payload = Serialize(new Dictionary<string, string> { ["message"] = msg ?? string.Empty }) };
+    }
+
+    // ── Workflow handlers ──────────────────────────────────────────────────────
+
+    private async Task<PipeMessage> HandleStartWorkflow(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<StartWorkflowRequest>(message.Payload!);
+        var instance = await _workflowEngine.StartAsync(req, ct);
+        return new PipeMessage
+        {
+            Type = MessageTypes.WorkflowUpdate, RequestId = message.RequestId,
+            Payload = Serialize(instance)
+        };
+    }
+
+    private PipeMessage HandleGetWorkflows(PipeMessage message)
+    {
+        string? workspacePath = null;
+        if (message.Payload is { Length: > 0 })
+        {
+            var req = Deserialize<GetWorkflowsRequest>(message.Payload);
+            workspacePath = req.WorkspacePath;
+        }
+        var defs = _workflowEngine.GetAvailableDefinitions(workspacePath);
+        return new PipeMessage
+        {
+            Type = MessageTypes.WorkflowUpdate, RequestId = message.RequestId,
+            Payload = Serialize(defs)
+        };
+    }
+
+    private PipeMessage HandleGetWorkflowInstances(PipeMessage message)
+    {
+        var instances = _workflowEngine.GetAllInstances();
+        return new PipeMessage
+        {
+            Type = MessageTypes.WorkflowUpdate, RequestId = message.RequestId,
+            Payload = Serialize(instances)
+        };
+    }
+
+    private async Task<PipeMessage> HandleCancelWorkflow(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<CancelWorkflowRequest>(message.Payload!);
+        await _workflowEngine.CancelAsync(req.InstanceId, ct);
+        var instance = _workflowEngine.GetInstance(req.InstanceId);
+        return new PipeMessage
+        {
+            Type = MessageTypes.WorkflowUpdate, RequestId = message.RequestId,
+            Payload = instance is not null ? Serialize(instance) : null
+        };
+    }
+
+    private async Task<PipeMessage> HandlePauseWorkflow(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<Dictionary<string, JsonElement>>(message.Payload!);
+        var instanceId = req["instanceId"].GetString()!;
+        await _workflowEngine.PauseAsync(instanceId, ct);
+        var instance = _workflowEngine.GetInstance(instanceId);
+        return new PipeMessage
+        {
+            Type = MessageTypes.WorkflowUpdate, RequestId = message.RequestId,
+            Payload = instance is not null ? Serialize(instance) : null
+        };
+    }
+
+    private async Task<PipeMessage> HandleResumeWorkflow(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<Dictionary<string, JsonElement>>(message.Payload!);
+        var instanceId = req["instanceId"].GetString()!;
+        await _workflowEngine.ResumeAsync(instanceId, ct);
+        var instance = _workflowEngine.GetInstance(instanceId);
+        return new PipeMessage
+        {
+            Type = MessageTypes.WorkflowUpdate, RequestId = message.RequestId,
+            Payload = instance is not null ? Serialize(instance) : null
+        };
+    }
+
+    private async Task<PipeMessage> HandleUpdateWorkflowContext(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<Dictionary<string, JsonElement>>(message.Payload!);
+        var instanceId = req["instanceId"].GetString()!;
+        var updates    = JsonSerializer.Deserialize<Dictionary<string, string>>(
+            req["updates"].GetRawText(), JsonOptions) ?? [];
+        await _workflowEngine.UpdateContextAsync(instanceId, updates, ct);
+        var instance = _workflowEngine.GetInstance(instanceId);
+        return new PipeMessage
+        {
+            Type = MessageTypes.WorkflowUpdate, RequestId = message.RequestId,
+            Payload = instance is not null ? Serialize(instance) : null
+        };
+    }
+
+    private static PipeMessage CreateError(string? requestId, string error) => new()
+    {
+        Type = MessageTypes.Error, RequestId = requestId,
+        Payload = JsonSerializer.SerializeToUtf8Bytes(error, JsonOptions)
+    };
+}

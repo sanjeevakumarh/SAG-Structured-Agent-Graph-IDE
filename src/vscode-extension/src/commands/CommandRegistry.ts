@@ -1,0 +1,669 @@
+import * as vscode from 'vscode';
+import { ServiceConnection } from '../client/ServiceConnection';
+import { TaskTreeProvider } from '../views/TaskTreeProvider';
+import { HistoryTreeProvider } from '../views/HistoryTreeProvider';
+import { DlqTreeProvider } from '../views/DlqTreeProvider';
+import { DiagnosticsManager } from '../views/DiagnosticsManager';
+import { WorkflowExplorerProvider } from '../views/WorkflowExplorerProvider';
+import { WorkflowGraphPanel } from '../views/WorkflowGraphPanel';
+import { submitTaskCommand, submitTaskOnFilesCommand } from './SubmitTaskCommand';
+import { compareModelsCommand } from './CompareModelsCommand';
+import { runWorkflowCommand } from './RunWorkflowCommand';
+import { ComparisonTracker } from '../utils/ComparisonTracker';
+import { openTaskResult } from '../utils/ResultViewer';
+import { log } from '../utils/Logger';
+import { WorkflowDefinition, WorkflowInstance } from '../client/MessageProtocol';
+
+export function registerCommands(
+    context: vscode.ExtensionContext,
+    connection: ServiceConnection,
+    taskTree: TaskTreeProvider,
+    historyTree: HistoryTreeProvider,
+    dlqTree: DlqTreeProvider,
+    diagnostics: DiagnosticsManager,
+    comparisonTracker: ComparisonTracker,
+    workflowExplorer: WorkflowExplorerProvider
+): void {
+    // Submit new task (with model picker)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.submitTask', () => {
+            submitTaskCommand(connection);
+        })
+    );
+
+    // Submit task on files selected in the Explorer (right-click → SAG: Submit Task on Selected Files)
+    // VSCode passes (clickedUri, allSelectedUris) for multi-select context menu commands.
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.submitTaskOnFiles',
+            (clickedUri: vscode.Uri, allUris: vscode.Uri[]) => {
+                submitTaskOnFilesCommand(connection, clickedUri, allUris);
+            }
+        )
+    );
+
+    // Cancel running task
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.cancelTask', async (item?: any) => {
+            let taskId: string | undefined;
+
+            if (item?.task?.taskId) {
+                taskId = item.task.taskId;
+            } else {
+                const input = await vscode.window.showInputBox({
+                    prompt: 'Enter task ID to cancel',
+                    placeHolder: 'Task ID (first 8 chars)',
+                });
+                taskId = input || undefined;
+            }
+
+            if (taskId) {
+                try {
+                    await connection.cancelTask(taskId);
+                    log(`Task ${taskId} cancelled`);
+                    vscode.window.showInformationMessage(`Task ${taskId.substring(0, 8)} cancelled`);
+                } catch (err) {
+                    vscode.window.showErrorMessage(`Failed to cancel task: ${err}`);
+                }
+            }
+        })
+    );
+
+    // Switch default model
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.switchModel', async () => {
+            const models = ['claude', 'codex', 'gemini', 'ollama'];
+            const pick = await vscode.window.showQuickPick(models, {
+                placeHolder: 'Select default AI model',
+            });
+            if (pick) {
+                await vscode.workspace.getConfiguration('sagIDE')
+                    .update('defaultModel', pick, vscode.ConfigurationTarget.Global);
+                vscode.window.showInformationMessage(`Default model set to ${pick}`);
+            }
+        })
+    );
+
+    // Review current file (quick action)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.reviewFile', async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showWarningMessage('No file is open');
+                return;
+            }
+
+            if (!connection.isConnected) {
+                vscode.window.showErrorMessage('SAG IDE service is not running');
+                return;
+            }
+
+            const config = vscode.workspace.getConfiguration('sagIDE');
+            const model = config.get<string>('models.codeReview', 'claude');
+            const modelIds: Record<string, string> = {
+                claude: 'claude-sonnet-4-20250514',
+                codex: 'gpt-4o',
+                gemini: 'gemini-2.0-flash',
+                ollama: 'codellama:13b',
+            };
+
+            try {
+                const result = await connection.submitTask({
+                    agentType: 'CodeReview',
+                    modelProvider: model as any,
+                    modelId: modelIds[model] || model,
+                    description: `Review ${editor.document.fileName}`,
+                    filePaths: [editor.document.uri.fsPath],
+                    priority: 1,
+                });
+
+                if (result) {
+                    vscode.window.showInformationMessage(
+                        `Code review started on ${model} — Task ${result.taskId.substring(0, 8)}`
+                    );
+                }
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to start review: ${err}`);
+            }
+        })
+    );
+
+    // Show task history
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.showTaskHistory', () => {
+            vscode.commands.executeCommand('sagIDE.taskHistory.focus');
+        })
+    );
+
+    // Show DLQ (refresh entries)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.showDlq', async () => {
+            try {
+                const entries = await connection.getDlqEntries();
+                dlqTree.refresh(entries);
+                log(`DLQ refreshed: ${entries.length} entries`);
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to load DLQ: ${err}`);
+            }
+        })
+    );
+
+    // Retry from DLQ
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.retryDlq', async (item?: any) => {
+            const dlqId = item?.entry?.id;
+            if (!dlqId) {
+                vscode.window.showWarningMessage('Select a DLQ entry to retry');
+                return;
+            }
+
+            try {
+                const result = await connection.retryDlq(dlqId);
+                if (result.retried) {
+                    vscode.window.showInformationMessage(
+                        `Retrying as new task ${result.newTaskId?.substring(0, 8)}`
+                    );
+                    vscode.commands.executeCommand('sagIDE.showDlq');
+                } else {
+                    vscode.window.showWarningMessage('DLQ entry not found or already retried');
+                }
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to retry: ${err}`);
+            }
+        })
+    );
+
+    // Discard from DLQ
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.discardDlq', async (item?: any) => {
+            const dlqId = item?.entry?.id;
+            if (!dlqId) {
+                vscode.window.showWarningMessage('Select a DLQ entry to discard');
+                return;
+            }
+
+            const confirm = await vscode.window.showWarningMessage(
+                `Discard failed task ${dlqId.substring(0, 8)}? This cannot be undone.`,
+                { modal: true },
+                'Discard'
+            );
+
+            if (confirm === 'Discard') {
+                try {
+                    await connection.discardDlq(dlqId);
+                    vscode.window.showInformationMessage(`DLQ entry ${dlqId.substring(0, 8)} discarded`);
+                    vscode.commands.executeCommand('sagIDE.showDlq');
+                } catch (err) {
+                    vscode.window.showErrorMessage(`Failed to discard: ${err}`);
+                }
+            }
+        })
+    );
+
+    // Clear diagnostics
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.clearDiagnostics', () => {
+            diagnostics.clearAll();
+            vscode.window.showInformationMessage('SAG IDE diagnostics cleared');
+        })
+    );
+
+    // Approve/Reject task (A005 approval workflow)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.approveTask', async (item?: any) => {
+            const taskId = item?.task?.taskId;
+            if (!taskId) {
+                vscode.window.showWarningMessage('Select a task to approve');
+                return;
+            }
+
+            const choice = await vscode.window.showQuickPick(
+                [
+                    { label: '$(check) Approve', description: 'Apply the proposed changes', value: true },
+                    { label: '$(x) Reject', description: 'Discard the proposed changes', value: false },
+                ],
+                { placeHolder: `Approve or reject task ${taskId.substring(0, 8)}?` }
+            );
+
+            if (choice !== undefined) {
+                try {
+                    await connection.approveTask(taskId, choice.value);
+                    vscode.window.showInformationMessage(
+                        choice.value
+                            ? `Task ${taskId.substring(0, 8)} approved`
+                            : `Task ${taskId.substring(0, 8)} rejected`
+                    );
+                } catch (err) {
+                    vscode.window.showErrorMessage(`Failed to approve/reject: ${err}`);
+                }
+            }
+        })
+    );
+
+    // Show result for a completed task (double-click in history)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.showDiff', async (item?: any) => {
+            const task = item?.task;
+            if (!task) {
+                vscode.window.showWarningMessage('Select a completed task to view its result');
+                return;
+            }
+
+            try {
+                // If result is already cached on the item use it; otherwise fetch from service
+                let status = task;
+                if (!status.result?.output) {
+                    status = await connection.getTaskStatus(task.taskId) ?? task;
+                }
+                await openTaskResult(status);
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to show result: ${err}`);
+            }
+        })
+    );
+
+    // Activity Logging Commands
+
+    // Initialize activity log for workspace
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.initActivityLog', async () => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showWarningMessage('No workspace folder open');
+                return;
+            }
+
+            const workspacePath = workspaceFolder.uri.fsPath;
+
+            try {
+                await connection.initializeActivityLog(workspacePath);
+                vscode.window.showInformationMessage('Activity logging initialized for workspace');
+
+                // Ask if user wants to sync existing git history
+                const syncGit = await vscode.window.showQuickPick(
+                    ['Yes', 'No'],
+                    { placeHolder: 'Sync existing git history to activity log?' }
+                );
+
+                if (syncGit === 'Yes') {
+                    const days = await vscode.window.showInputBox({
+                        prompt: 'Number of days of git history to sync',
+                        value: '7',
+                        validateInput: (value) => {
+                            const num = parseInt(value, 10);
+                            if (isNaN(num) || num <= 0) {
+                                return 'Enter a positive number';
+                            }
+                            return undefined;
+                        }
+                    });
+
+                    if (days) {
+                        await vscode.window.withProgress(
+                            {
+                                location: vscode.ProgressLocation.Notification,
+                                title: `Syncing ${days} days of git history...`,
+                                cancellable: false,
+                            },
+                            async () => {
+                                await connection.syncGitHistory(workspacePath, parseInt(days, 10));
+                            }
+                        );
+                        vscode.window.showInformationMessage(`Git history synced (${days} days)`);
+                    }
+                }
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to initialize activity log: ${err}`);
+            }
+        })
+    );
+
+    // Configure activity log settings
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.configureActivityLog', async () => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showWarningMessage('No workspace folder open');
+                return;
+            }
+
+            const workspacePath = workspaceFolder.uri.fsPath;
+
+            try {
+                const config = await connection.getActivityConfig(workspacePath);
+                if (!config) {
+                    vscode.window.showWarningMessage('Activity logging not initialized. Run "Initialize Activity Log" first.');
+                    return;
+                }
+
+                // Toggle enabled/disabled
+                const enabledChoice = await vscode.window.showQuickPick(
+                    [
+                        { label: '$(check) Enabled', value: true },
+                        { label: '$(x) Disabled', value: false }
+                    ],
+                    { placeHolder: 'Enable or disable activity logging' }
+                );
+
+                if (enabledChoice === undefined) {
+                    return;
+                }
+
+                config.enabled = enabledChoice.value;
+
+                // Git integration mode
+                const gitMode = await vscode.window.showQuickPick(
+                    [
+                        { label: 'Disabled', description: 'No git integration', value: 'Disabled' },
+                        { label: 'Log Commits', description: 'Parse and log existing commits', value: 'LogCommits' },
+                        { label: 'Generate Messages', description: 'Generate commit messages from activities', value: 'GenerateMessages' },
+                        { label: 'Bidirectional', description: 'Both - log commits AND generate messages', value: 'Bidirectional' },
+                    ],
+                    { placeHolder: 'Select git integration mode' }
+                );
+
+                if (gitMode) {
+                    config.gitIntegrationMode = gitMode.value as any;
+                }
+
+                config.updatedAt = new Date().toISOString();
+
+                await connection.updateActivityConfig(workspacePath, config);
+                vscode.window.showInformationMessage('Activity log configuration updated');
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to configure activity log: ${err}`);
+            }
+        })
+    );
+
+    // View activity log (open README.md)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.viewActivityLog', async () => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showWarningMessage('No workspace folder open');
+                return;
+            }
+
+            const readmePath = vscode.Uri.joinPath(workspaceFolder.uri, '.sag-activity', 'README.md');
+
+            try {
+                const doc = await vscode.workspace.openTextDocument(readmePath);
+                await vscode.window.showTextDocument(doc, { preview: false });
+            } catch (err) {
+                vscode.window.showWarningMessage('Activity log README not found. Run "Initialize Activity Log" first.');
+            }
+        })
+    );
+
+    // Sync git history
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.syncGitHistory', async () => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showWarningMessage('No workspace folder open');
+                return;
+            }
+
+            const workspacePath = workspaceFolder.uri.fsPath;
+
+            const days = await vscode.window.showInputBox({
+                prompt: 'Number of days of git history to sync',
+                value: '7',
+                validateInput: (value) => {
+                    const num = parseInt(value, 10);
+                    if (isNaN(num) || num <= 0) {
+                        return 'Enter a positive number';
+                    }
+                    return undefined;
+                }
+            });
+
+            if (!days) {
+                return;
+            }
+
+            try {
+                await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: `Syncing ${days} days of git history...`,
+                        cancellable: false,
+                    },
+                    async () => {
+                        await connection.syncGitHistory(workspacePath, parseInt(days, 10));
+                    }
+                );
+                vscode.window.showInformationMessage(`Git history synced (${days} days)`);
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to sync git history: ${err}`);
+            }
+        })
+    );
+
+    // Compare models — same task on N models side-by-side
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.compareModels', () => {
+            compareModelsCommand(connection, comparisonTracker);
+        })
+    );
+
+    // Toggle git auto-commit of task results
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.toggleGitAutoCommit', async () => {
+            const config = vscode.workspace.getConfiguration('sagIDE');
+            const current = config.get<boolean>('git.autoCommitResults', false);
+            await config.update('git.autoCommitResults', !current, vscode.ConfigurationTarget.Global);
+
+            try {
+                await connection.toggleGitAutoCommit(!current);
+            } catch {
+                // Service may not be running; the config update still persists
+            }
+
+            vscode.window.showInformationMessage(
+                `Git auto-commit ${!current ? 'enabled' : 'disabled'} — results will ${!current ? '' : 'not '}be committed to sag-agent-log`
+            );
+        })
+    );
+
+    // Generate commit message
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.generateCommitMessage', async () => {
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            if (!workspaceFolder) {
+                vscode.window.showWarningMessage('No workspace folder open');
+                return;
+            }
+
+            const workspacePath = workspaceFolder.uri.fsPath;
+
+            try {
+                await vscode.window.withProgress(
+                    {
+                        location: vscode.ProgressLocation.Notification,
+                        title: 'Generating commit message from recent activities...',
+                        cancellable: false,
+                    },
+                    async () => {
+                        const message = await connection.generateCommitMessage(workspacePath, 1);
+
+                        if (message) {
+                            // Copy to clipboard
+                            await vscode.env.clipboard.writeText(message);
+
+                            // Show in modal
+                            const action = await vscode.window.showInformationMessage(
+                                'Commit message generated and copied to clipboard!',
+                                { modal: false },
+                                'View Message'
+                            );
+
+                            if (action === 'View Message') {
+                                const doc = await vscode.workspace.openTextDocument({
+                                    content: message,
+                                    language: 'markdown',
+                                });
+                                await vscode.window.showTextDocument(doc, { preview: true });
+                            }
+                        } else {
+                            vscode.window.showWarningMessage('No recent activities to generate commit message from');
+                        }
+                    }
+                );
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to generate commit message: ${err}`);
+            }
+        })
+    );
+
+    // Open task output / result panel for a given taskId (used by workflow graph node click)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.openTaskOutput', async (taskId?: string) => {
+            if (!taskId) {
+                vscode.window.showWarningMessage('No task ID provided');
+                return;
+            }
+            try {
+                const status = await connection.getTaskStatus(taskId);
+                if (!status) {
+                    vscode.window.showWarningMessage(`Task ${taskId.substring(0, 8)} not found`);
+                    return;
+                }
+                await openTaskResult(status);
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to open task output: ${err}`);
+            }
+        })
+    );
+
+    // ── Workflow Orchestration Commands ──────────────────────────────────────
+
+    // Run a workflow (command palette or tree click)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.runWorkflow', (preselectedDef?: WorkflowDefinition) => {
+            runWorkflowCommand(context, connection, preselectedDef);
+        })
+    );
+
+    // Open workflow graph panel (tree item click or notification button)
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.openWorkflowGraph', async (instanceOrId: WorkflowInstance | string) => {
+            try {
+                let instance: WorkflowInstance | undefined;
+                if (typeof instanceOrId === 'string') {
+                    const all = await connection.getWorkflowInstances();
+                    instance = all.find(i => i.instanceId === instanceOrId);
+                } else {
+                    instance = instanceOrId;
+                }
+                if (!instance) {
+                    vscode.window.showWarningMessage('Workflow instance not found');
+                    return;
+                }
+                // Get the definition for graph layout
+                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                const defs = await connection.getWorkflows(workspacePath);
+                const def = defs.find(d => d.id === instance!.definitionId);
+                if (!def) {
+                    vscode.window.showWarningMessage('Workflow definition not found');
+                    return;
+                }
+                WorkflowGraphPanel.show(context, instance, def);
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to open workflow graph: ${err}`);
+            }
+        })
+    );
+
+    // Cancel a running workflow instance
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.cancelWorkflowInstance', async (instanceId?: string) => {
+            if (!instanceId) {
+                vscode.window.showWarningMessage('No workflow instance to cancel');
+                return;
+            }
+            try {
+                await connection.cancelWorkflow(instanceId);
+                vscode.window.showInformationMessage(`Workflow ${instanceId.substring(0, 8)} cancelled`);
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to cancel workflow: ${err}`);
+            }
+        })
+    );
+
+    // Refresh workflow explorer
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.refreshWorkflows', async () => {
+            try {
+                const workspacePath = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+                const [defs, instances] = await Promise.all([
+                    connection.getWorkflows(workspacePath),
+                    connection.getWorkflowInstances(),
+                ]);
+                workflowExplorer.refreshDefinitions(defs);
+                workflowExplorer.refreshInstances(instances);
+                log(`Workflows refreshed: ${defs.length} definitions, ${instances.length} instances`);
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to refresh workflows: ${err}`);
+            }
+        })
+    );
+
+    // Pause a running workflow instance
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.pauseWorkflowInstance', async (instanceId?: string) => {
+            if (!instanceId) {
+                vscode.window.showWarningMessage('No workflow instance selected');
+                return;
+            }
+            try {
+                await connection.pauseWorkflow(instanceId);
+                vscode.window.showInformationMessage(`Workflow paused. Running steps will complete; no new steps will start.`);
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to pause workflow: ${err}`);
+            }
+        })
+    );
+
+    // Resume a paused workflow instance
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.resumeWorkflowInstance', async (instanceId?: string) => {
+            if (!instanceId) {
+                vscode.window.showWarningMessage('No workflow instance selected');
+                return;
+            }
+            try {
+                await connection.resumeWorkflow(instanceId);
+                vscode.window.showInformationMessage(`Workflow resumed.`);
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to resume workflow: ${err}`);
+            }
+        })
+    );
+
+    // Update a workflow context variable while running
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.updateWorkflowContext', async (instanceId?: string) => {
+            if (!instanceId) {
+                vscode.window.showWarningMessage('No workflow instance selected');
+                return;
+            }
+            const key = await vscode.window.showInputBox({
+                prompt: 'Variable name (e.g. feature_description)',
+                placeHolder: 'context_key',
+            });
+            if (!key) { return; }
+            const value = await vscode.window.showInputBox({
+                prompt: `New value for {{${key}}}`,
+                placeHolder: 'new value',
+            });
+            if (value === undefined) { return; }
+            try {
+                await connection.updateWorkflowContext(instanceId, { [key]: value });
+                vscode.window.showInformationMessage(`Context updated: {{${key}}} = "${value}"`);
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to update context: ${err}`);
+            }
+        })
+    );
+}

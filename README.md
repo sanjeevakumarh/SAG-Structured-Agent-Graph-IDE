@@ -58,8 +58,8 @@ sequenceDiagram
 
 ### 1) Clone
 ```bash
-git clone https://github.com/yourusername/AgentIDE.git
-cd AgentIDE
+git clone https://github.com/sanjeevakumarh/SAGExtention.git
+cd SAGExtention
 ```
 
 ### 2) Start the orchestration service

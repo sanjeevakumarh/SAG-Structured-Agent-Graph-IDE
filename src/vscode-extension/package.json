@@ -1,0 +1,361 @@
+{
+  "name": "sag-ide",
+  "displayName": "SAG IDE",
+  "description": "Local-first deterministic workflow runtime for agent-native software development — run Ollama, Claude, Codex, Gemini in parallel",
+  "version": "0.1.0",
+  "publisher": "sag-ide",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages", "Machine Learning", "Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sagIDE.submitTask",
+        "title": "SAG: Submit Task",
+        "icon": "$(play)"
+      },
+      {
+        "command": "sagIDE.cancelTask",
+        "title": "SAG: Cancel Task",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "sagIDE.switchModel",
+        "title": "SAG: Switch Model"
+      },
+      {
+        "command": "sagIDE.reviewFile",
+        "title": "SAG: Review Current File"
+      },
+      {
+        "command": "sagIDE.showTaskHistory",
+        "title": "SAG: Show Task History"
+      },
+      {
+        "command": "sagIDE.showDlq",
+        "title": "SAG: Show Failed Tasks (DLQ)",
+        "icon": "$(warning)"
+      },
+      {
+        "command": "sagIDE.retryDlq",
+        "title": "SAG: Retry Failed Task",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "sagIDE.discardDlq",
+        "title": "SAG: Discard Failed Task",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "sagIDE.approveTask",
+        "title": "SAG: Approve/Reject Task",
+        "icon": "$(check)"
+      },
+      {
+        "command": "sagIDE.showDiff",
+        "title": "SAG: Show Task Details"
+      },
+      {
+        "command": "sagIDE.clearDiagnostics",
+        "title": "SAG: Clear Diagnostics"
+      },
+      {
+        "command": "sagIDE.initActivityLog",
+        "title": "SAG: Initialize Activity Log",
+        "icon": "$(notebook)"
+      },
+      {
+        "command": "sagIDE.configureActivityLog",
+        "title": "SAG: Configure Activity Log",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "sagIDE.viewActivityLog",
+        "title": "SAG: View Activity Log",
+        "icon": "$(book)"
+      },
+      {
+        "command": "sagIDE.syncGitHistory",
+        "title": "SAG: Sync Git History",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "sagIDE.generateCommitMessage",
+        "title": "SAG: Generate Commit Message",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "sagIDE.submitTaskOnFiles",
+        "title": "SAG: Submit Task on Selected Files",
+        "icon": "$(play)"
+      },
+      {
+        "command": "sagIDE.compareModels",
+        "title": "SAG: Compare Models",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "sagIDE.toggleGitAutoCommit",
+        "title": "SAG: Toggle Git Auto-Commit",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "sagIDE.runWorkflow",
+        "title": "SAG: Run Workflow",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "sagIDE.openWorkflowGraph",
+        "title": "SAG: Open Workflow Graph",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "sagIDE.cancelWorkflowInstance",
+        "title": "SAG: Cancel Workflow",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "sagIDE.pauseWorkflowInstance",
+        "title": "SAG: Pause Workflow",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "sagIDE.resumeWorkflowInstance",
+        "title": "SAG: Resume Workflow",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "sagIDE.updateWorkflowContext",
+        "title": "SAG: Update Workflow Context Variable",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "sagIDE.refreshWorkflows",
+        "title": "SAG: Refresh Workflows",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "sagIDE.openTaskOutput",
+        "title": "SAG: Open Task Output",
+        "icon": "$(output)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sag-ide",
+          "title": "SAG IDE",
+          "icon": "resources/icons/robot.svg"
+        }
+      ]
+    },
+    "views": {
+      "sag-ide": [
+        {
+          "id": "sagIDE.activeTasks",
+          "name": "Active Tasks"
+        },
+        {
+          "id": "sagIDE.taskHistory",
+          "name": "Task History"
+        },
+        {
+          "id": "sagIDE.dlq",
+          "name": "Failed Tasks (DLQ)"
+        },
+        {
+          "id": "sagIDE.workflowExplorer",
+          "name": "Workflows"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "sagIDE.submitTask",
+          "when": "view == sagIDE.activeTasks",
+          "group": "navigation@1"
+        },
+        {
+          "command": "sagIDE.compareModels",
+          "when": "view == sagIDE.activeTasks",
+          "group": "navigation@2"
+        },
+        {
+          "command": "sagIDE.showDlq",
+          "when": "view == sagIDE.dlq",
+          "group": "navigation"
+        },
+        {
+          "command": "sagIDE.runWorkflow",
+          "when": "view == sagIDE.workflowExplorer",
+          "group": "navigation@1"
+        },
+        {
+          "command": "sagIDE.refreshWorkflows",
+          "when": "view == sagIDE.workflowExplorer",
+          "group": "navigation@2"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "sagIDE.submitTaskOnFiles",
+          "when": "explorerViewletVisible",
+          "group": "7_modification@99"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "sagIDE.cancelTask",
+          "when": "view == sagIDE.activeTasks && viewItem == runningTask",
+          "group": "inline"
+        },
+        {
+          "command": "sagIDE.retryDlq",
+          "when": "view == sagIDE.dlq && viewItem == dlqEntry",
+          "group": "inline@1"
+        },
+        {
+          "command": "sagIDE.discardDlq",
+          "when": "view == sagIDE.dlq && viewItem == dlqEntry",
+          "group": "inline@2"
+        },
+        {
+          "command": "sagIDE.approveTask",
+          "when": "view == sagIDE.activeTasks && viewItem == waitingApprovalTask",
+          "group": "inline"
+        },
+        {
+          "command": "sagIDE.showDiff",
+          "when": "view == sagIDE.taskHistory && viewItem == completedTask",
+          "group": "inline"
+        },
+        {
+          "command": "sagIDE.cancelWorkflowInstance",
+          "when": "view == sagIDE.workflowExplorer && viewItem == workflowRunning",
+          "group": "inline@3"
+        },
+        {
+          "command": "sagIDE.pauseWorkflowInstance",
+          "when": "view == sagIDE.workflowExplorer && viewItem == workflowRunning",
+          "group": "inline@1"
+        },
+        {
+          "command": "sagIDE.resumeWorkflowInstance",
+          "when": "view == sagIDE.workflowExplorer && viewItem == workflowPaused",
+          "group": "inline@1"
+        },
+        {
+          "command": "sagIDE.updateWorkflowContext",
+          "when": "view == sagIDE.workflowExplorer && (viewItem == workflowRunning || viewItem == workflowPaused)",
+          "group": "inline@2"
+        },
+        {
+          "command": "sagIDE.openWorkflowGraph",
+          "when": "view == sagIDE.workflowExplorer && (viewItem == workflowRunning || viewItem == workflowDone || viewItem == workflowPaused)",
+          "group": "inline"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SAG IDE",
+      "properties": {
+        "sagIDE.defaultModel": {
+          "type": "string",
+          "default": "claude",
+          "enum": ["claude", "codex", "gemini", "ollama"],
+          "description": "Default AI model for new tasks"
+        },
+        "sagIDE.maxConcurrentTasks": {
+          "type": "number",
+          "default": 5,
+          "description": "Maximum number of parallel agent tasks"
+        },
+        "sagIDE.apiKeys.anthropic": {
+          "type": "string",
+          "default": "",
+          "description": "Anthropic API key for Claude"
+        },
+        "sagIDE.apiKeys.openai": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key for Codex/GPT"
+        },
+        "sagIDE.apiKeys.google": {
+          "type": "string",
+          "default": "",
+          "description": "Google API key for Gemini"
+        },
+        "sagIDE.ollama.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Ollama server URL (e.g., http://your-linux-server:11434)"
+        },
+        "sagIDE.ollama.model": {
+          "type": "string",
+          "default": "deepseek-coder:6.7b",
+          "description": "Ollama model to use (e.g., deepseek-coder:6.7b, codellama:13b)"
+        },
+        "sagIDE.models.codeReview": {
+          "type": "string",
+          "default": "claude",
+          "enum": ["claude", "codex", "gemini", "ollama"],
+          "description": "Model to use for code review tasks"
+        },
+        "sagIDE.models.testGeneration": {
+          "type": "string",
+          "default": "codex",
+          "enum": ["claude", "codex", "gemini", "ollama"],
+          "description": "Model to use for test generation tasks"
+        },
+        "sagIDE.models.refactoring": {
+          "type": "string",
+          "default": "gemini",
+          "enum": ["claude", "codex", "gemini", "ollama"],
+          "description": "Model to use for refactoring tasks"
+        },
+        "sagIDE.pipeName": {
+          "type": "string",
+          "default": "SAGIDEPipe",
+          "description": "Named pipe name for service communication"
+        },
+        "sagIDE.overnightTime": {
+          "type": "string",
+          "default": "23:00",
+          "description": "Default overnight schedule time (HH:MM, local time) — used by 'Schedule for Tonight' option"
+        },
+        "sagIDE.git.autoCommitResults": {
+          "type": "boolean",
+          "default": false,
+          "description": "Auto-commit agent task results to the sag-agent-log branch for audit history"
+        },
+        "sagIDE.git.autoCommitBranch": {
+          "type": "string",
+          "default": "sag-agent-log",
+          "description": "Git branch where agent task results are committed (orphan branch, does not affect main history)"
+        },
+        "sagIDE.workflowsPath": {
+          "type": "string",
+          "default": ".agentide/workflows",
+          "description": "Path (relative to workspace root) where workflow YAML files are stored"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0"
+  },
+  "dependencies": {
+  }
+}
