@@ -52,7 +52,7 @@ sequenceDiagram
 
 ### 1) Clone
 ```bash
-git clone sanjeevakumarh/SAGExtention/AgentIDE.git
+git clone https://github.com/sanjeevakumarh/SAGExtention/AgentIDE.git
 cd AgentIDE
 ```
 
