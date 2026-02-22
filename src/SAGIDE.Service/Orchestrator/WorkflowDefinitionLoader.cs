@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -7,21 +8,29 @@ namespace SAGIDE.Service.Orchestrator;
 
 /// <summary>
 /// Loads WorkflowDefinition objects from:
-///   1. Built-in YAML templates (hardcoded strings, always available)
+///   1. Built-in YAML templates — directory configured by SAGIDE:BuiltInTemplatesPath
+///      (defaults to "Orchestrator/Templates" relative to the executable; copied there by the build)
 ///   2. Workspace .agentide/workflows/*.yaml files (workspace-specific)
 /// </summary>
 public class WorkflowDefinitionLoader
 {
     private readonly ILogger<WorkflowDefinitionLoader> _logger;
     private readonly IDeserializer _deserializer;
+    private readonly string _builtInTemplatesDir;
 
-    public WorkflowDefinitionLoader(ILogger<WorkflowDefinitionLoader> logger)
+    public WorkflowDefinitionLoader(ILogger<WorkflowDefinitionLoader> logger, IConfiguration configuration)
     {
         _logger = logger;
         _deserializer = new DeserializerBuilder()
             .WithNamingConvention(UnderscoredNamingConvention.Instance)
             .IgnoreUnmatchedProperties()
             .Build();
+
+        // Path can be absolute or relative to the executable directory
+        var configuredPath = configuration["SAGIDE:BuiltInTemplatesPath"] ?? "Orchestrator/Templates";
+        _builtInTemplatesDir = Path.IsPathRooted(configuredPath)
+            ? configuredPath
+            : Path.Combine(AppContext.BaseDirectory, configuredPath);
     }
 
     /// <summary>Maps YAML agent names to AgentType enum values.</summary>
@@ -37,33 +46,37 @@ public class WorkflowDefinitionLoader
         _ => AgentType.CodeReview
     };
 
-    /// <summary>Loads all built-in workflow definitions.</summary>
+    /// <summary>Loads all built-in workflow definitions from the configured templates directory.</summary>
     public List<WorkflowDefinition> GetBuiltInDefinitions()
     {
-        var templates = new List<(string id, string yaml)>
-        {
-            ("ship-feature",     BuiltInYaml.ShipFeature),
-            ("review-fix-loop",  BuiltInYaml.ReviewFixLoop),
-            ("code-audit",       BuiltInYaml.CodeAudit),
-            ("tdd-workflow",     BuiltInYaml.TddWorkflow),
-            ("write-and-test",   BuiltInYaml.WriteAndTest),
-            ("build-and-verify", BuiltInYaml.BuildAndVerify),
-        };
-
         var result = new List<WorkflowDefinition>();
-        foreach (var (id, yaml) in templates)
+
+        if (!Directory.Exists(_builtInTemplatesDir))
+        {
+            _logger.LogWarning(
+                "Built-in templates directory not found: {Dir}. No built-in workflows will be available.",
+                _builtInTemplatesDir);
+            return result;
+        }
+
+        foreach (var file in Directory.EnumerateFiles(_builtInTemplatesDir, "*.yaml")
+                    .Concat(Directory.EnumerateFiles(_builtInTemplatesDir, "*.yml")))
         {
             try
             {
-                var def = ParseYaml(yaml, id);
+                var yaml = File.ReadAllText(file);
+                var id   = Path.GetFileNameWithoutExtension(file);
+                var def  = ParseYaml(yaml, id);
                 def.IsBuiltIn = true;
                 result.Add(def);
+                _logger.LogDebug("Loaded built-in workflow '{Name}' from {File}", def.Name, file);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to parse built-in workflow template '{Id}'", id);
+                _logger.LogError(ex, "Failed to parse built-in workflow template '{File}'", file);
             }
         }
+
         return result;
     }
 
@@ -107,6 +120,19 @@ public class WorkflowDefinitionLoader
             Description = raw.Description ?? string.Empty,
         };
 
+        if (raw.ConvergencePolicy is { } cp)
+        {
+            def.ConvergencePolicy = new ConvergencePolicy
+            {
+                MaxIterations          = cp.MaxIterations,
+                EscalationTarget       = cp.EscalationTarget,
+                PartialRetryScope      = cp.PartialRetryScope,
+                ConvergenceHintMemory  = cp.ConvergenceHintMemory,
+                TimeoutPerIterationSec = cp.TimeoutPerIterationSec,
+                ContradictionDetection = cp.ContradictionDetection,
+            };
+        }
+
         if (raw.Parameters is not null)
         {
             foreach (var p in raw.Parameters)
@@ -138,8 +164,14 @@ public class WorkflowDefinitionLoader
                     Command           = s.Command,
                     WorkingDir        = s.WorkingDir,
                     ExitCodePolicy    = s.ExitCodePolicy ?? "FAIL_ON_NONZERO",
+                    TimeoutSec        = s.TimeoutSec,
                     ConstraintExpr    = s.ConstraintExpr,
                     OnConstraintFail  = s.OnConstraintFail ?? "fail",
+                    SlaHours          = s.SlaHours,
+                    TimeoutAction     = s.TimeoutAction ?? "cancel",
+                    ApprovalPrompt    = s.ApprovalPrompt,
+                    ContextVarName    = s.ContextVarName,
+                    SourceSteps       = s.SourceSteps ?? [],
                 };
 
                 if (s.Branches is { Count: > 0 })
@@ -200,6 +232,40 @@ public class WorkflowDefinitionLoader
 
             if (step.Type == "constraint" && string.IsNullOrWhiteSpace(step.ConstraintExpr))
                 errors.Add($"Step '{step.Id}' (type: constraint) must have a 'constraint_expr' field.");
+
+            if (step.Type == "context_retrieval")
+            {
+                if (string.IsNullOrWhiteSpace(step.ContextVarName))
+                    errors.Add($"Step '{step.Id}' (type: context_retrieval) must have a 'context_var_name' field.");
+                if (step.SourceSteps.Count == 0)
+                    errors.Add($"Step '{step.Id}' (type: context_retrieval) must have at least one 'source_steps' entry.");
+                foreach (var src in step.SourceSteps)
+                    if (!stepIds.Contains(src))
+                        errors.Add($"Step '{step.Id}': source_steps references unknown step '{src}'.");
+            }
+        }
+
+        // Workflows with back-edges (next:) should declare a convergence_policy.
+        var hasLoop = def.Steps.Any(s => s.Next is not null);
+        if (hasLoop && def.ConvergencePolicy is null)
+            errors.Add(
+                "Workflow has feedback loop steps (next:) but no 'convergence_policy' is declared. " +
+                "Add a 'convergence_policy' block with at least 'max_iterations' and 'escalation_target'.");
+
+        // Validate convergence_policy fields if present
+        if (def.ConvergencePolicy is { } policy)
+        {
+            var validTargets = new[] { "HUMAN_APPROVAL", "DLQ", "CANCEL" };
+            if (!validTargets.Contains(policy.EscalationTarget, StringComparer.OrdinalIgnoreCase))
+                errors.Add(
+                    $"convergence_policy.escalation_target '{policy.EscalationTarget}' is invalid. " +
+                    $"Valid values: {string.Join(", ", validTargets)}.");
+
+            var validScopes = new[] { "FAILING_NODES_ONLY", "FROM_CODEGEN", "FULL_WORKFLOW" };
+            if (!validScopes.Contains(policy.PartialRetryScope, StringComparer.OrdinalIgnoreCase))
+                errors.Add(
+                    $"convergence_policy.partial_retry_scope '{policy.PartialRetryScope}' is invalid. " +
+                    $"Valid values: {string.Join(", ", validScopes)}.");
         }
 
         // ── 2. Cycle detection in depends_on DAG ──────────────────────────────
@@ -248,6 +314,17 @@ public class WorkflowDefinitionLoader
         public string? Description { get; set; }
         public List<YamlParameter>? Parameters { get; set; }
         public List<YamlStep>? Steps { get; set; }
+        public YamlConvergencePolicy? ConvergencePolicy { get; set; }
+    }
+
+    private class YamlConvergencePolicy
+    {
+        public int MaxIterations { get; set; } = 3;
+        public string EscalationTarget { get; set; } = "CANCEL";
+        public string PartialRetryScope { get; set; } = "FAILING_NODES_ONLY";
+        public bool ConvergenceHintMemory { get; set; } = false;
+        public int TimeoutPerIterationSec { get; set; } = 0;
+        public bool ContradictionDetection { get; set; } = true;
     }
 
     private class YamlParameter
@@ -273,9 +350,17 @@ public class WorkflowDefinitionLoader
         public string? Command { get; set; }
         public string? WorkingDir { get; set; }
         public string? ExitCodePolicy { get; set; }
+        public int TimeoutSec { get; set; } = 0;
         // Constraint step fields
         public string? ConstraintExpr { get; set; }
         public string? OnConstraintFail { get; set; }
+        // Context retrieval step fields
+        public string? ContextVarName { get; set; }
+        public List<string>? SourceSteps { get; set; }
+        // Human approval step fields
+        public int SlaHours { get; set; } = 0;
+        public string? TimeoutAction { get; set; }
+        public string? ApprovalPrompt { get; set; }
     }
 
     private class YamlBranch
@@ -285,154 +370,4 @@ public class WorkflowDefinitionLoader
     }
 }
 
-// ── Built-in YAML templates ───────────────────────────────────────────────────
-
-internal static class BuiltInYaml
-{
-    public const string ShipFeature = """
-        name: "Ship Feature"
-        description: "Generate code, review and test in parallel, security scan, then document."
-        parameters:
-          - name: feature_description
-            type: string
-            default: "the requested feature"
-        steps:
-          - id: generate_code
-            agent: Coder
-            prompt: "Implement the following feature: {{feature_description}}"
-          - id: code_review
-            agent: Reviewer
-            depends_on: [generate_code]
-            prompt: "Review this code for quality and correctness:\n\n{{generate_code.output}}"
-          - id: unit_tests
-            agent: Tester
-            depends_on: [generate_code]
-            prompt: "Generate comprehensive unit tests for this code:\n\n{{generate_code.output}}"
-          - id: security_scan
-            agent: Security
-            depends_on: [code_review, unit_tests]
-            prompt: "Security scan this code:\n\n{{generate_code.output}}\n\nReview findings:\n{{code_review.output}}"
-          - id: documentation
-            agent: Documenter
-            depends_on: [security_scan]
-            prompt: "Write documentation for this code:\n\n{{generate_code.output}}"
-        """;
-
-    public const string ReviewFixLoop = """
-        name: "Review & Fix Loop"
-        description: "Review code, refactor based on feedback, re-review (up to 2 rounds)."
-        steps:
-          - id: review
-            agent: Reviewer
-            prompt: "Review this code thoroughly. Return structured JSON with an 'issues' array."
-          - id: fix
-            agent: Coder
-            depends_on: [review]
-            prompt: "Fix all issues found in this review:\n\n{{review.output}}\n\nApply the fixes to the code."
-            next: review
-            max_iterations: 2
-        """;
-
-    public const string CodeAudit = """
-        name: "Code Audit"
-        description: "Run code review, debug analysis, and documentation in parallel."
-        steps:
-          - id: review
-            agent: Reviewer
-            prompt: "Perform a thorough code review."
-          - id: debug
-            agent: Debugger
-            prompt: "Analyze for bugs, memory leaks, and race conditions."
-          - id: docs
-            agent: Documenter
-            prompt: "Generate or update documentation for this code."
-        """;
-
-    public const string TddWorkflow = """
-        name: "TDD Workflow"
-        description: "Write failing tests first, then implement code to make them pass."
-        steps:
-          - id: write_tests
-            agent: Tester
-            prompt: "Write failing unit tests that specify the expected behavior. Do NOT implement the code yet."
-          - id: implement
-            agent: Coder
-            depends_on: [write_tests]
-            prompt: "Implement code to make these tests pass:\n\n{{write_tests.output}}"
-          - id: check_router
-            type: router
-            depends_on: [implement]
-            branches:
-              - condition: "hasIssues"
-                target: implement
-              - condition: "success"
-                target: refactor
-          - id: refactor
-            agent: Coder
-            depends_on: [implement]
-            prompt: "Refactor this code for clarity and maintainability:\n\n{{implement.output}}"
-        """;
-
-    public const string WriteAndTest = """
-        name: "Write & Test"
-        description: "Refactor code then generate comprehensive tests."
-        steps:
-          - id: refactor
-            agent: Coder
-            prompt: "Refactor and improve this code."
-          - id: tests
-            agent: Tester
-            depends_on: [refactor]
-            prompt: "Generate comprehensive tests for:\n\n{{refactor.output}}"
-        """;
-
-    public const string BuildAndVerify = """
-        name: "Build & Verify"
-        description: "Generate code, build it, check the build passed, then review and document."
-        parameters:
-          - name: feature_description
-            type: string
-            default: "the requested feature"
-          - name: build_command
-            type: string
-            default: "dotnet build"
-          - name: workspace_path
-            type: string
-            default: "."
-        steps:
-          - id: generate_code
-            agent: Coder
-            prompt: |
-              Implement the following feature: {{feature_description}}
-              Return complete, production-ready code with no placeholders.
-
-          - id: build
-            type: tool
-            depends_on: [generate_code]
-            command: "{{build_command}}"
-            working_dir: "{{workspace_path}}"
-            exit_code_policy: FAIL_ON_NONZERO
-
-          - id: check_build
-            type: constraint
-            depends_on: [build]
-            constraint_expr: "exit_code(build) == 0"
-            on_constraint_fail: fail
-
-          - id: review
-            agent: Reviewer
-            depends_on: [check_build]
-            prompt: |
-              Review this generated code for correctness, performance, and best practices.
-              Build output: {{build.output}}
-              Code: {{generate_code.output}}
-
-          - id: documentation
-            agent: Documenter
-            depends_on: [review]
-            prompt: |
-              Write documentation for this feature.
-              Code: {{generate_code.output}}
-              Review notes: {{review.output}}
-        """;
-}
+// Built-in YAML templates have been moved to Orchestrator/Templates/*.yaml

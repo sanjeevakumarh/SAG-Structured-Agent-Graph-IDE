@@ -1,6 +1,8 @@
 namespace SAGIDE.Core.Models;
 
-
+/// <summary>
+/// Static definition of a workflow — parsed from YAML or built-in.
+/// </summary>
 public class WorkflowDefinition
 {
     public string Id { get; set; } = string.Empty;
@@ -9,6 +11,12 @@ public class WorkflowDefinition
     public List<WorkflowParameter> Parameters { get; set; } = [];
     public List<WorkflowStepDef> Steps { get; set; } = [];
     public bool IsBuiltIn { get; set; }
+
+    /// <summary>
+    /// Required for workflows with feedback loops (next: back-edges).
+    /// Defines the convergence contract: max iterations, escalation target, and optional causal memory.
+    /// </summary>
+    public ConvergencePolicy? ConvergencePolicy { get; set; }
 }
 
 public class WorkflowParameter
@@ -61,6 +69,12 @@ public class WorkflowStepDef
     /// <summary>How non-zero exit codes are handled: FAIL_ON_NONZERO | WARN_ON_NONZERO | IGNORE.</summary>
     public string ExitCodePolicy { get; set; } = "FAIL_ON_NONZERO";
 
+    /// <summary>
+    /// Per-step wall-clock timeout in seconds for tool steps (§2.1 BaseNode timeout_sec).
+    /// 0 = no per-step timeout (global task execution timeout applies).
+    /// </summary>
+    public int TimeoutSec { get; set; } = 0;
+
     // ── Constraint step fields (Type == "constraint") ─────────────────────────
 
     /// <summary>
@@ -73,6 +87,70 @@ public class WorkflowStepDef
 
     /// <summary>What to do when the constraint fails: "fail" (default) or "warn".</summary>
     public string OnConstraintFail { get; set; } = "fail";
+
+    // ── Context retrieval step fields (Type == "context_retrieval") ───────────
+
+    /// <summary>
+    /// Name of the input-context variable to set.
+    /// The aggregated output text is stored in inst.InputContext[ContextVarName]
+    /// so downstream prompts can reference it via {{context_var_name}}.
+    /// </summary>
+    public string? ContextVarName { get; set; }
+
+    /// <summary>
+    /// Step IDs whose outputs are aggregated into ContextVarName.
+    /// Outputs are concatenated in declaration order, separated by a blank line.
+    /// </summary>
+    public List<string> SourceSteps { get; set; } = [];
+
+    // ── Human approval step fields (Type == "human_approval") ─────────────────
+
+    /// <summary>Hours before the SLA is considered breached. 0 = no timeout.</summary>
+    public int SlaHours { get; set; } = 0;
+
+    /// <summary>
+    /// What to do on SLA timeout: "cancel" (default) or "dlq".
+    /// </summary>
+    public string TimeoutAction { get; set; } = "cancel";
+
+    /// <summary>
+    /// Human-readable prompt shown in the approval UI.
+    /// Supports {{step_id.output}} template variables.
+    /// </summary>
+    public string? ApprovalPrompt { get; set; }
+}
+
+/// <summary>
+/// Convergence policy for constraint-loop workflows (§2.2).
+/// Declare on any workflow that contains a feedback loop (next: back-edge).
+/// </summary>
+public class ConvergencePolicy
+{
+    /// <summary>Maximum REFACTOR→VALIDATE cycles before escalating. Required.</summary>
+    public int MaxIterations { get; set; } = 3;
+
+    /// <summary>
+    /// What to do when max_iterations is exceeded.
+    /// HUMAN_APPROVAL — pause and wait for human decision.
+    /// DLQ — send workflow to dead-letter queue.
+    /// CANCEL — cancel the workflow immediately (default).
+    /// </summary>
+    public string EscalationTarget { get; set; } = "CANCEL";
+
+    /// <summary>FAILING_NODES_ONLY | FROM_CODEGEN | FULL_WORKFLOW</summary>
+    public string PartialRetryScope { get; set; } = "FAILING_NODES_ONLY";
+
+    /// <summary>When true, convergence hints from prior iterations are injected into refactor prompts.</summary>
+    public bool ConvergenceHintMemory { get; set; } = false;
+
+    /// <summary>Wall-clock timeout per iteration in seconds. 0 = unlimited.</summary>
+    public int TimeoutPerIterationSec { get; set; } = 0;
+
+    /// <summary>
+    /// When true, immediately escalates to HUMAN_APPROVAL if issues fail to decrease between
+    /// iterations — indicating mutually exclusive constraints (§2.2). Default: true.
+    /// </summary>
+    public bool ContradictionDetection { get; set; } = true;
 }
 
 public class RouterConfig

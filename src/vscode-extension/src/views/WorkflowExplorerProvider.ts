@@ -21,7 +21,8 @@ export class WorkflowGroupItem extends vscode.TreeItem {
                 ? vscode.TreeItemCollapsibleState.Expanded
                 : vscode.TreeItemCollapsibleState.Collapsed
         );
-        this.contextValue = 'workflowGroup';
+        // Distinct contextValues let package.json menus target each group separately
+        this.contextValue = groupId === 'templates' ? 'workflowTemplateGroup' : 'workflowRunningGroup';
         this.iconPath = groupId === 'templates'
             ? new vscode.ThemeIcon('library')
             : new vscode.ThemeIcon('run-all');
@@ -37,8 +38,11 @@ export class WorkflowTemplateItem extends vscode.TreeItem {
             new vscode.ThemeColor('charts.blue')
         );
         this.contextValue = 'workflowTemplate';
+        const paramLine = definition.parameters.length > 0
+            ? `\n\nParameters: ${definition.parameters.map(p => `\`${p.name}\`${p.default ? ` (default: ${p.default})` : ''}`).join(', ')}`
+            : '';
         this.tooltip = new vscode.MarkdownString(
-            `**${definition.name}**\n\n${definition.description}\n\n` +
+            `**${definition.name}**\n\n${definition.description}${paramLine}\n\n` +
             `Steps: ${definition.steps.map(s => s.id).join(' → ')}\n\n` +
             `_Click to run this workflow_`
         );
@@ -64,9 +68,10 @@ export class WorkflowRunningItem extends vscode.TreeItem {
             statusIcon.icon,
             new vscode.ThemeColor(statusIcon.color)
         );
-        this.contextValue = instance.status === 'running'
+        const statusLower = (instance.status as string).toLowerCase();
+        this.contextValue = statusLower === 'running'
             ? 'workflowRunning'
-            : instance.status === 'paused'
+            : statusLower === 'paused'
                 ? 'workflowPaused'
                 : 'workflowDone';
         this.tooltip = new vscode.MarkdownString(
@@ -91,7 +96,8 @@ export class WorkflowStepItem extends vscode.TreeItem {
         stepId: string,
         stepStatus: WorkflowStepStatus,
         iteration: number,
-        issueCount: number
+        issueCount: number,
+        taskId?: string
     ) {
         super(stepId, vscode.TreeItemCollapsibleState.None);
         const { icon, color } = stepStatusToIcon(stepStatus);
@@ -102,6 +108,16 @@ export class WorkflowStepItem extends vscode.TreeItem {
             issueCount > 0 ? `${issueCount} issues` : '',
         ].filter(Boolean).join(' · ');
         this.contextValue = 'workflowStep';
+
+        // Completed/failed steps with a task result are double-clickable to view output
+        if (taskId && (stepStatus === 'completed' || stepStatus === 'failed')) {
+            this.tooltip = new vscode.MarkdownString(`_Click to view step output_`);
+            this.command = {
+                command: 'sagIDE.openTaskOutput',
+                title: 'View Step Output',
+                arguments: [taskId],
+            };
+        }
     }
 }
 
@@ -134,6 +150,14 @@ export class WorkflowExplorerProvider implements vscode.TreeDataProvider<Workflo
         this._onDidChangeTreeData.fire(undefined);
     }
 
+    clearCompletedInstances(): void {
+        const terminal = new Set(['completed', 'failed', 'cancelled']);
+        this.instances = this.instances.filter(
+            i => !terminal.has((i.status as string).toLowerCase())
+        );
+        this._onDidChangeTreeData.fire(undefined);
+    }
+
     getDefinitions(): WorkflowDefinition[] {
         return this.definitions;
     }
@@ -156,19 +180,20 @@ export class WorkflowExplorerProvider implements vscode.TreeDataProvider<Workflo
                 return this.definitions.map(d => new WorkflowTemplateItem(d));
             }
             // Show running first, then paused, completed/failed
-            const sorted = [...this.instances].sort((a, b) => {
-                const order: Record<WorkflowStatus, number> = {
-                    running: 0, paused: 1, failed: 2, completed: 3, cancelled: 4,
-                };
-                return (order[a.status] ?? 5) - (order[b.status] ?? 5);
-            });
+            const order: Record<string, number> = {
+                running: 0, paused: 1, failed: 2, completed: 3, cancelled: 4,
+            };
+            const sorted = [...this.instances].sort((a, b) =>
+                ((order[(a.status as string).toLowerCase()] ?? 5) -
+                 (order[(b.status as string).toLowerCase()] ?? 5))
+            );
             return sorted.map(i => new WorkflowRunningItem(i));
         }
 
         if (element instanceof WorkflowRunningItem) {
             const inst = element.instance;
             return Object.values(inst.stepExecutions).map(se =>
-                new WorkflowStepItem(inst.instanceId, se.stepId, se.status, se.iteration, se.issueCount)
+                new WorkflowStepItem(inst.instanceId, se.stepId, se.status, se.iteration, se.issueCount, se.taskId)
             );
         }
 
@@ -179,22 +204,26 @@ export class WorkflowExplorerProvider implements vscode.TreeDataProvider<Workflo
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function statusToIcon(status: WorkflowStatus): { icon: string; color: string } {
-    switch (status) {
+    switch ((status as string).toLowerCase()) {
         case 'running':   return { icon: 'loading~spin',  color: 'charts.blue' };
         case 'paused':    return { icon: 'debug-pause',   color: 'charts.yellow' };
         case 'completed': return { icon: 'check',         color: 'charts.green' };
         case 'failed':    return { icon: 'error',         color: 'charts.red' };
         case 'cancelled': return { icon: 'circle-slash',  color: 'disabledForeground' };
+        default:          return { icon: 'question',      color: 'disabledForeground' };
     }
 }
 
 function stepStatusToIcon(status: WorkflowStepStatus): { icon: string; color: string } {
-    switch (status) {
-        case 'pending': return { icon: 'clock', color: 'disabledForeground' };
-        case 'running': return { icon: 'loading~spin', color: 'charts.blue' };
-        case 'completed': return { icon: 'pass', color: 'charts.green' };
-        case 'failed': return { icon: 'error', color: 'charts.red' };
-        case 'skipped': return { icon: 'debug-step-over', color: 'disabledForeground' };
+    switch ((status as string).toLowerCase()) {
+        case 'pending':              return { icon: 'clock',           color: 'disabledForeground' };
+        case 'running':              return { icon: 'loading~spin',    color: 'charts.blue' };
+        case 'completed':            return { icon: 'pass',            color: 'charts.green' };
+        case 'failed':               return { icon: 'error',           color: 'charts.red' };
+        case 'skipped':              return { icon: 'debug-step-over', color: 'disabledForeground' };
+        case 'waitingforapproval':   return { icon: 'person',          color: 'charts.yellow' };
+        case 'rejected':             return { icon: 'circle-slash',    color: 'charts.orange' };
+        default:                     return { icon: 'question',        color: 'disabledForeground' };
     }
 }
 

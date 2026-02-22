@@ -1,0 +1,26 @@
+name: "Ship Feature"
+description: "Generate code, review and test in parallel, security scan, then document."
+parameters:
+  - name: feature_description
+    type: string
+    default: "the requested feature"
+steps:
+  - id: generate_code
+    agent: Coder
+    prompt: "Implement the following feature: {{feature_description}}"
+  - id: code_review
+    agent: Reviewer
+    depends_on: [generate_code]
+    prompt: "Review this code for quality and correctness:\n\n{{generate_code.output}}"
+  - id: unit_tests
+    agent: Tester
+    depends_on: [generate_code]
+    prompt: "Generate comprehensive unit tests for this code:\n\n{{generate_code.output}}"
+  - id: security_scan
+    agent: Security
+    depends_on: [code_review, unit_tests]
+    prompt: "Security scan this code:\n\n{{generate_code.output}}\n\nReview findings:\n{{code_review.output}}"
+  - id: documentation
+    agent: Documenter
+    depends_on: [security_scan]
+    prompt: "Write documentation for this code:\n\n{{generate_code.output}}"

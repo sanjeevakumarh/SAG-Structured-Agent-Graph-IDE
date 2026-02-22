@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { ServiceConnection } from '../client/ServiceConnection';
-import { WorkflowDefinition, StartWorkflowRequest } from '../client/MessageProtocol';
+import { WorkflowDefinition, WorkflowStepDef, StepModelOverride, StartWorkflowRequest } from '../client/MessageProtocol';
 import { WorkflowGraphPanel } from '../views/WorkflowGraphPanel';
-import { ALL_MODELS } from './SubmitTaskCommand';
+import { getAllModels } from './SubmitTaskCommand';
 
 export async function runWorkflowCommand(
     context: vscode.ExtensionContext,
@@ -63,44 +63,110 @@ export async function runWorkflowCommand(
         inputs[param.name] = value;
     }
 
-    // 4. Select default model (used for steps that don't specify their own model)
+    // 4. Load available models + affinity map (needed for both global and per-step picks)
+    const allModels = await getAllModels(connection);
+    let affinities: Record<string, string> = {};
+    try {
+        const resp = await connection.getModels();
+        affinities = resp?.affinities ?? {};
+    } catch { /* ignore — fallback to no pre-selection */ }
+
+    // 5. Select global default model (used for any step without its own override)
     const modelPick = await vscode.window.showQuickPick(
-        ALL_MODELS.map(m => ({
+        allModels.map(m => ({
             label: m.label,
             description: m.description,
             value: m,
         })),
         {
-            placeHolder: 'Select default model (used for steps without explicit model)',
+            placeHolder: 'Select default model (used for steps without a specific override)',
             title: `SAG Workflow — ${definition.name}`,
         }
     );
     if (!modelPick) { return; }
-    const model = modelPick.value;
+    const defaultModel = modelPick.value;
 
-    // 5. Determine file paths — use open editor files or workspace root
+    // 6. Per-step model selection for configurable agent steps
+    //    A step is "configurable" when it is an agent step and has no model locked in the YAML.
+    const stepModelOverrides: Record<string, StepModelOverride> = {};
+    const configurableSteps = (definition.steps ?? []).filter(isConfigurableAgentStep);
+
+    if (configurableSteps.length > 0) {
+        // Build a lookup: agent type name → recommended model key from affinities
+        for (const step of configurableSteps) {
+            const agentType  = step.agent ?? step.id;            // e.g. "CodeReview"
+            const affinityKey = affinities[agentType] ?? affinities[agentType.toLowerCase()];
+            const defaultItem = {
+                label: `$(pass) Use workflow default  —  ${defaultModel.label}`,
+                description: 'Applies the global model chosen above',
+                value: null as null,  // null = no override; use instance default
+            };
+            const affinityItem = affinityKey
+                ? allModels.find(m => m.key === affinityKey)
+                : undefined;
+
+            const items = [
+                defaultItem,
+                // Affinity recommendation (if it differs from the global default)
+                ...(affinityItem && affinityItem.key !== defaultModel.key
+                    ? [{
+                        label: `$(star) ${affinityItem.label}  $(tag) recommended for ${agentType}`,
+                        description: affinityItem.description,
+                        value: affinityItem,
+                      }]
+                    : []),
+                // All remaining models
+                ...allModels
+                    .filter(m => m.key !== affinityItem?.key)
+                    .map(m => ({
+                        label: m.label,
+                        description: m.description,
+                        value: m,
+                    })),
+            ];
+
+            const stepPick = await vscode.window.showQuickPick(items, {
+                placeHolder: `Model for step "${step.id}" (${agentType})`,
+                title: `SAG Workflow — ${definition.name}  |  Step: ${step.id}`,
+            });
+            if (stepPick === undefined) { return; } // user cancelled the whole flow
+            if (stepPick.value !== null) {
+                stepModelOverrides[step.id] = {
+                    provider: stepPick.value.provider,
+                    modelId:  stepPick.value.modelId,
+                    endpoint: stepPick.value.endpoint,
+                };
+            }
+            // null → user chose "use workflow default" → no override entry → engine falls through to instance default
+        }
+    }
+
+    // 7. Determine file paths — use open editor files or workspace root
     let filePaths: string[] = [];
     const activeEditor = vscode.window.activeTextEditor;
     if (activeEditor && !activeEditor.document.isUntitled) {
         filePaths = [activeEditor.document.uri.fsPath];
     }
 
-    // 6. Submit workflow
+    // 8. Submit workflow
     try {
         const req: StartWorkflowRequest = {
             definitionId: definition.id,
             inputs,
             filePaths,
-            defaultModelId: model.modelId,
-            defaultModelProvider: model.provider,
-            modelEndpoint: model.endpoint,
+            defaultModelId:       defaultModel.modelId,
+            defaultModelProvider: defaultModel.provider,
+            modelEndpoint:        defaultModel.endpoint,
             workspacePath,
+            stepModelOverrides:   Object.keys(stepModelOverrides).length > 0
+                                    ? stepModelOverrides
+                                    : undefined,
         };
 
         const { instanceId } = await connection.startWorkflow(req);
         vscode.window.showInformationMessage(`$(run-all) Workflow "${definition.name}" started`);
 
-        // 7. Open graph panel — wait briefly for the engine to register the instance
+        // 9. Open graph panel — wait briefly for the engine to register the instance
         setTimeout(async () => {
             try {
                 const instances = await connection.getWorkflowInstances();
@@ -116,4 +182,13 @@ export async function runWorkflowCommand(
     } catch (err) {
         vscode.window.showErrorMessage(`Failed to start workflow: ${err}`);
     }
+}
+
+/**
+ * Returns true for steps where the user can meaningfully choose a model at launch time:
+ * - type must be "agent" (routers, tools, constraints, approvals have no LLM)
+ * - must NOT have a model locked in the YAML (modelId already set → author intent)
+ */
+function isConfigurableAgentStep(step: WorkflowStepDef): boolean {
+    return (step.type === 'agent' || !step.type) && !step.modelId;
 }

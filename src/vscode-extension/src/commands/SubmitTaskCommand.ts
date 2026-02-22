@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { ServiceConnection } from '../client/ServiceConnection';
-import { AgentType, ModelProvider, SubmitTaskRequest } from '../client/MessageProtocol';
+import { AgentType, ModelOption, ModelProvider, SubmitTaskRequest } from '../client/MessageProtocol';
 import { log, logError } from '../utils/Logger';
+import { pickContext, enumerateFolder } from '../utils/ContextPicker';
 
 // ── Schedule helpers ─────────────────────────────────────────────────────────
 
@@ -62,72 +64,77 @@ export const AGENT_TYPES: { label: string; value: AgentType; description: string
     { label: 'Documentation',   value: 'Documentation',  description: 'Generate docs' },
 ];
 
-// Task affinity: recommended model per agent type (matches appsettings.json TaskAffinities)
-// Current server layout (generic local fleet):
-//   local-primary    → qwen2.5-coder:7b-instruct
-//   local-secondary  → qwen2.5-coder:7b-instruct
-//   local-refactor   → deepseek-coder:6.7b
-//   local-docs       → phi3.5:latest
-const TASK_AFFINITY: Record<AgentType, string> = {
-    CodeReview:     'ollama-local-primary',
-    TestGeneration: 'ollama-local-primary',
-    Refactoring:    'ollama-refactor',
-    Debug:          'ollama-local-primary',
-    Documentation:  'ollama-docs',
-    SecurityReview: 'ollama-refactor',
-};
+// Re-export ModelOption from the protocol so callers don't need two imports.
+export type { ModelOption } from '../client/MessageProtocol';
 
-export interface ModelOption {
-    key: string;
-    label: string;
-    provider: ModelProvider;
-    modelId: string;
-    description: string;
-    endpoint?: string;  // explicit Ollama server URL — bypasses routing table
+/**
+ * Returns the full model list from the service (primary) or VS Code settings (offline fallback).
+ * Cloud models are included only when the service has API keys configured.
+ */
+export async function getAllModels(connection: ServiceConnection): Promise<ModelOption[]> {
+    if (connection.isConnected) {
+        try {
+            const resp = await connection.getModels();
+            if (resp && resp.models.length > 0) { return resp.models; }
+        } catch {
+            // fall through to settings fallback
+        }
+    }
+    return getOllamaModelsFromSettings();
 }
 
-export const ALL_MODELS: ModelOption[] = [
-        // ── Local LAN models (private, free, no internet) ──────────────────────
-        { key: 'ollama-refactor',  label: 'DeepSeek Coder 7B  [Local · Refactor]',
-            provider: 'ollama', modelId: 'deepseek-coder:6.7b',
-            endpoint: 'http://local-refactor:11434',
-            description: 'Fast local — refactoring node' },
-        { key: 'ollama-local-primary',   label: 'Qwen2.5 Coder 7B-Instruct  [Local · Primary]',
-            provider: 'ollama', modelId: 'qwen2.5-coder:7b-instruct',
-            endpoint: 'http://localhost:11434',
-            description: 'Code review, debug, tests (primary)' },
-        { key: 'ollama-local-secondary', label: 'Qwen2.5 Coder 7B-Instruct  [Local · Secondary]',
-            provider: 'ollama', modelId: 'qwen2.5-coder:7b-instruct',
-            endpoint: 'http://local-secondary:11434',
-            description: 'Code review, debug, tests (secondary)' },
-        { key: 'ollama-docs',  label: 'Phi 3.5  [Local · Docs]',
-            provider: 'ollama', modelId: 'phi3.5:latest',
-            endpoint: 'http://local-docs:11434',
-            description: 'Lightweight local — documentation node' },
-    // ── Cloud models ────────────────────────────────────────────────────────
-    { key: 'gemini', label: 'Gemini 2.0 Flash  [Cloud]',
-      provider: 'gemini', modelId: 'gemini-2.0-flash',
-      description: 'Google — refactoring, large context' },
-    { key: 'codex',  label: 'GPT-4o  [Cloud]',
-      provider: 'codex', modelId: 'gpt-4o',
-      description: 'OpenAI — test generation, documentation' },
-    { key: 'claude', label: 'Claude Sonnet 4.5  [Cloud]',
-      provider: 'claude', modelId: 'claude-sonnet-4-5-20250929',
-      description: 'Anthropic — best reasoning, complex debug' },
-];
+/** Offline fallback: reads Ollama servers from VS Code settings. */
+function getOllamaModelsFromSettings(): ModelOption[] {
+    const cfg = vscode.workspace.getConfiguration('sagIDE');
+    const servers = cfg.get<ModelOption[]>('ollama.servers');
+    if (servers && servers.length > 0) {
+        return servers.map(s => ({ ...s, provider: 'ollama' as ModelProvider }));
+    }
+    const baseUrl = cfg.get<string>('ollama.baseUrl', 'http://localhost:11434');
+    const model   = cfg.get<string>('ollama.model',   '');
+    if (!model) { return []; }
+    return [{
+        key: 'ollama-local', label: `Ollama ${model}  [Local]`,
+        provider: 'ollama', modelId: model, endpoint: baseUrl,
+        description: `Local Ollama (${baseUrl})`,
+    }];
+}
+
+/** Offline fallback: preferred model key per agent type from sagIDE.taskAffinities setting. */
+function getTaskAffinityFromSettings(): Record<string, string> {
+    return vscode.workspace.getConfiguration('sagIDE').get<Record<string, string>>('taskAffinities') ?? {};
+}
 
 /** Shared picker — returns agent + model selection, or null if cancelled. */
-async function pickAgentAndModel(): Promise<{ agentPick: { label: string; value: AgentType }; model: ModelOption } | null> {
+async function pickAgentAndModel(
+    connection: ServiceConnection
+): Promise<{ agentPick: { label: string; value: AgentType }; model: ModelOption } | null> {
     const agentPick = await vscode.window.showQuickPick(
         AGENT_TYPES.map(a => ({ label: a.label, description: a.description, value: a.value })),
         { placeHolder: 'Select agent type', title: 'SAG IDE — New Task' }
     );
     if (!agentPick) { return null; }
 
-    const affinityKey = TASK_AFFINITY[agentPick.value];
-    const recommended = ALL_MODELS.find(m => m.key === affinityKey);
-    const rest = ALL_MODELS.filter(m => m.key !== affinityKey);
-    const ordered = recommended ? [recommended, ...rest] : ALL_MODELS;
+    let allModels: ModelOption[];
+    let affinities: Record<string, string>;
+    if (connection.isConnected) {
+        try {
+            const resp = await connection.getModels();
+            allModels  = resp?.models ?? getOllamaModelsFromSettings();
+            affinities = resp?.affinities ?? getTaskAffinityFromSettings();
+        } catch {
+            allModels  = getOllamaModelsFromSettings();
+            affinities = getTaskAffinityFromSettings();
+        }
+    } else {
+        allModels  = getOllamaModelsFromSettings();
+        affinities = getTaskAffinityFromSettings();
+    }
+
+    const affinityKey = affinities[agentPick.value];
+    const recommended = affinityKey ? allModels.find(m => m.key === affinityKey) : undefined;
+    const rest = allModels.filter(m => m.key !== affinityKey);
+    const ordered = recommended ? [recommended, ...rest] : allModels;
 
     const modelPick = await vscode.window.showQuickPick(
         ordered.map(m => ({
@@ -148,32 +155,36 @@ export async function submitTaskCommand(connection: ServiceConnection): Promise<
         return;
     }
 
-    const pick = await pickAgentAndModel();
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    const workspacePath = workspaceFolder?.uri.fsPath || '';
+
+    const pick = await pickAgentAndModel(connection);
     if (!pick) { return; }
     const { agentPick, model } = pick;
 
-    const activeFile = vscode.window.activeTextEditor?.document.uri.fsPath;
+    const context = await pickContext(workspacePath || undefined);
+    if (!context) { return; }
+
+    // Pre-fill the description for a single file; leave blank for multi-file/folder/no-context
+    const singleName = context.filePaths.length === 1 ? path.basename(context.filePaths[0]) : undefined;
     const description = await vscode.window.showInputBox({
         prompt: 'Describe what you want the agent to do',
-        placeHolder: activeFile
-            ? `e.g., Review ${activeFile.split(/[\\/]/).pop()}`
+        placeHolder: singleName
+            ? `e.g., Review ${singleName}`
             : 'e.g., Review this code for security issues',
-        value: activeFile ? `Review ${activeFile.split(/[\\/]/).pop()}` : '',
+        value: singleName ? `Review ${singleName}` : '',
     });
     if (!description) { return; }
 
     const scheduledFor = await pickSchedule();
     if (scheduledFor === null) { return; } // cancelled
 
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    const workspacePath = workspaceFolder?.uri.fsPath || '';
-
     const request: SubmitTaskRequest = {
         agentType: agentPick.value,
         modelProvider: model.provider,
         modelId: model.modelId,
         description,
-        filePaths: activeFile ? [activeFile] : [],
+        filePaths: context.filePaths,
         priority: 0,
         metadata: workspacePath ? { workspacePath } : undefined,
         scheduledFor,
@@ -181,12 +192,13 @@ export async function submitTaskCommand(connection: ServiceConnection): Promise<
     };
 
     try {
-        log(`Submitting task: ${agentPick.label} via ${model.label}${scheduledFor ? ` (scheduled: ${scheduledFor})` : ''}`);
+        const contextSummary = context.filePaths.length > 0 ? ` on ${context.label}` : '';
+        log(`Submitting task: ${agentPick.label} via ${model.label}${contextSummary}${scheduledFor ? ` (scheduled: ${scheduledFor})` : ''}`);
         const result = await connection.submitTask(request);
         if (result) {
             const scheduled = scheduledFor ? ` — runs at ${new Date(scheduledFor).toLocaleTimeString()}` : '';
             vscode.window.showInformationMessage(
-                `Task ${result.taskId.substring(0, 8)} queued — ${agentPick.label} via ${model.label}${scheduled}`
+                `Task ${result.taskId.substring(0, 8)} queued — ${agentPick.label} via ${model.label}${contextSummary}${scheduled}`
             );
         }
     } catch (err) {
@@ -216,13 +228,15 @@ export async function submitTaskOnFilesCommand(
         return;
     }
 
-    // Filter to files only; skip directories
+    // Collect files; for folders, enumerate contents recursively (excluding common noise dirs)
     const filePaths: string[] = [];
     for (const uri of uris) {
         try {
             const stat = await vscode.workspace.fs.stat(uri);
             if (stat.type === vscode.FileType.File) {
                 filePaths.push(uri.fsPath);
+            } else if (stat.type === vscode.FileType.Directory) {
+                filePaths.push(...await enumerateFolder(uri));
             }
         } catch {
             // Skip inaccessible URIs silently
@@ -234,7 +248,7 @@ export async function submitTaskOnFilesCommand(
         return;
     }
 
-    const pick = await pickAgentAndModel();
+    const pick = await pickAgentAndModel(connection);
     if (!pick) { return; }
     const { agentPick, model } = pick;
 

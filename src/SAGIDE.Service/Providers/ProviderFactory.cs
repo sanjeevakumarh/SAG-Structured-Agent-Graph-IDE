@@ -11,13 +11,19 @@ public class ProviderFactory
     private readonly IConfiguration _configuration;
     private readonly ILoggerFactory _loggerFactory;
     private readonly TimeoutConfig _timeoutConfig;
+    private readonly OllamaHostHealthMonitor? _ollamaHealthMonitor;
     private readonly Dictionary<ModelProvider, IAgentProvider> _providers = new();
 
-    public ProviderFactory(IConfiguration configuration, ILoggerFactory loggerFactory, TimeoutConfig timeoutConfig)
+    public ProviderFactory(
+        IConfiguration configuration,
+        ILoggerFactory loggerFactory,
+        TimeoutConfig timeoutConfig,
+        OllamaHostHealthMonitor? ollamaHealthMonitor = null)
     {
-        _configuration = configuration;
-        _loggerFactory = loggerFactory;
-        _timeoutConfig = timeoutConfig;
+        _configuration       = configuration;
+        _loggerFactory       = loggerFactory;
+        _timeoutConfig       = timeoutConfig;
+        _ollamaHealthMonitor = ollamaHealthMonitor;
         InitializeProviders();
     }
 
@@ -27,26 +33,32 @@ public class ProviderFactory
         var openaiKey    = _configuration["SAGIDE:ApiKeys:OpenAI"] ?? "";
         var googleKey    = _configuration["SAGIDE:ApiKeys:Google"] ?? "";
 
+        // Per-provider token limits — configurable via SAGIDE:Providers:<Name>:MaxTokens (default 4096)
+        var claudeMaxTokens = _configuration.GetValue("SAGIDE:Providers:Claude:MaxTokens", 4096);
+        var geminiMaxTokens = _configuration.GetValue("SAGIDE:Providers:Gemini:MaxTokens", 4096);
+        var codexMaxTokens  = _configuration.GetValue("SAGIDE:Providers:Codex:MaxTokens",  4096);
+        var ollamaMaxTokens = _configuration.GetValue("SAGIDE:Providers:Ollama:MaxTokens", 4096);
+
         if (!string.IsNullOrEmpty(anthropicKey))
         {
             var timeout = TimeSpan.FromMilliseconds(_timeoutConfig.GetProviderTimeoutMs(ModelProvider.Claude));
             _providers[ModelProvider.Claude] = new ClaudeProvider(anthropicKey,
                 new RetryPolicy { RetryableStatusCodes = [429, 500, 502, 503, 529] },
-                timeout, _loggerFactory.CreateLogger<ClaudeProvider>());
+                timeout, _loggerFactory.CreateLogger<ClaudeProvider>(), claudeMaxTokens);
         }
 
-        if (!string.IsNullOrEmpty(openaiKey))
         {
             var timeout = TimeSpan.FromMilliseconds(_timeoutConfig.GetProviderTimeoutMs(ModelProvider.Codex));
+            var openAiCompatibleEndpoints = BuildOpenAICompatibleRoutingTable();
             _providers[ModelProvider.Codex] = new CodexProvider(openaiKey, RetryPolicy.Default,
-                timeout, _loggerFactory.CreateLogger<CodexProvider>());
+                timeout, _loggerFactory.CreateLogger<CodexProvider>(), openAiCompatibleEndpoints, codexMaxTokens);
         }
 
         if (!string.IsNullOrEmpty(googleKey))
         {
             var timeout = TimeSpan.FromMilliseconds(_timeoutConfig.GetProviderTimeoutMs(ModelProvider.Gemini));
             _providers[ModelProvider.Gemini] = new GeminiProvider(googleKey, RetryPolicy.Default,
-                timeout, _loggerFactory.CreateLogger<GeminiProvider>());
+                timeout, _loggerFactory.CreateLogger<GeminiProvider>(), geminiMaxTokens);
         }
 
         // Multi-server Ollama: build model-to-endpoint routing table from config
@@ -56,13 +68,32 @@ public class ProviderFactory
 
         _providers[ModelProvider.Ollama] = new OllamaProvider(
             defaultServer, modelEndpoints, RetryPolicy.Default, ollamaTimeout,
-            _loggerFactory.CreateLogger<OllamaProvider>());
+            _loggerFactory.CreateLogger<OllamaProvider>(),
+            _ollamaHealthMonitor, ollamaMaxTokens);
     }
 
     private Dictionary<string, string> BuildOllamaRoutingTable()
     {
         var table = new Dictionary<string, string>();
         var serversSection = _configuration.GetSection("SAGIDE:Ollama:Servers");
+        foreach (var server in serversSection.GetChildren())
+        {
+            var baseUrl = server["BaseUrl"] ?? "";
+            var modelsSection = server.GetSection("Models");
+            foreach (var modelEntry in modelsSection.GetChildren())
+            {
+                var modelId = modelEntry.Value ?? "";
+                if (!string.IsNullOrEmpty(modelId) && !string.IsNullOrEmpty(baseUrl))
+                    table[modelId] = baseUrl;
+            }
+        }
+        return table;
+    }
+
+    private Dictionary<string, string> BuildOpenAICompatibleRoutingTable()
+    {
+        var table = new Dictionary<string, string>();
+        var serversSection = _configuration.GetSection("SAGIDE:OpenAICompatible:Servers");
         foreach (var server in serversSection.GetChildren())
         {
             var baseUrl = server["BaseUrl"] ?? "";

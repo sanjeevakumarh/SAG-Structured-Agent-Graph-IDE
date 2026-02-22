@@ -2,6 +2,7 @@ using System.IO.Pipes;
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Service.Communication.Messages;
 
@@ -12,9 +13,14 @@ public class NamedPipeServer
     private readonly string _pipeName;
     private readonly ILogger<NamedPipeServer> _logger;
     private readonly MessageHandler _messageHandler;
+    private readonly CommunicationConfig _config;
     // Per-client write lock prevents concurrent writes from HandleClientAsync and BroadcastAsync
     private record ClientEntry(NamedPipeServerStream Stream, SemaphoreSlim WriteLock);
     private readonly ConcurrentDictionary<string, ClientEntry> _clients = new();
+    // Maps taskId → clientId so streaming output is routed only to the submitting window
+    private readonly ConcurrentDictionary<string, string> _taskOwners = new();
+    // bbounded channel — BroadcastAsync enqueues here; drain loop fans out to all clients
+    private readonly Channel<PipeMessage> _broadcastChannel;
     private CancellationTokenSource? _cts;
 
     // Matches TypeScript client: camelCase properties, string enums, byte[] as base64 string
@@ -28,11 +34,21 @@ public class NamedPipeServer
     public NamedPipeServer(
         string pipeName,
         MessageHandler messageHandler,
-        ILogger<NamedPipeServer> logger)
+        ILogger<NamedPipeServer> logger,
+        CommunicationConfig? config = null)
     {
-        _pipeName = pipeName;
+        _pipeName       = pipeName;
         _messageHandler = messageHandler;
-        _logger = logger;
+        _logger         = logger;
+        _config         = config ?? new CommunicationConfig();
+
+        // C4: DropOldest ensures BroadcastAsync never blocks even under high-throughput streaming.
+        _broadcastChannel = Channel.CreateBounded<PipeMessage>(new BoundedChannelOptions(_config.MaxBroadcastQueueSize)
+        {
+            FullMode          = BoundedChannelFullMode.DropOldest,
+            SingleReader      = true,   // only DrainBroadcastChannelAsync reads
+            SingleWriter      = false   // multiple threads may broadcast concurrently
+        });
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -40,7 +56,16 @@ public class NamedPipeServer
         _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _logger.LogInformation("Named pipe server starting on: {PipeName}", _pipeName);
 
-        while (!_cts.Token.IsCancellationRequested)
+        // Run accept loop and broadcast drain loop concurrently.
+        await Task.WhenAll(
+            RunAcceptLoopAsync(_cts.Token),
+            DrainBroadcastChannelAsync(_cts.Token));
+    }
+
+    private async Task RunAcceptLoopAsync(CancellationToken ct)
+    {
+        var consecutiveErrors = 0;
+        while (!ct.IsCancellationRequested)
         {
             try
             {
@@ -51,13 +76,14 @@ public class NamedPipeServer
                     PipeTransmissionMode.Byte,
                     PipeOptions.Asynchronous);
 
-                await server.WaitForConnectionAsync(_cts.Token);
+                await server.WaitForConnectionAsync(ct);
+                consecutiveErrors = 0; // reset on successful accept
                 var clientId = Guid.NewGuid().ToString("N")[..8];
                 var entry = new ClientEntry(server, new SemaphoreSlim(1, 1));
                 _clients[clientId] = entry;
                 _logger.LogInformation("Client {ClientId} connected", clientId);
 
-                _ = HandleClientAsync(clientId, entry, _cts.Token);
+                _ = HandleClientAsync(clientId, entry, ct);
             }
             catch (OperationCanceledException)
             {
@@ -65,9 +91,39 @@ public class NamedPipeServer
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error accepting client connection");
-                await Task.Delay(100, cancellationToken);
+                consecutiveErrors++;
+                var delayMs = (int)Math.Min(
+                    _config.AcceptRetryInitialDelayMs *
+                        Math.Pow(_config.AcceptRetryBackoffMultiplier, consecutiveErrors - 1),
+                    _config.AcceptRetryMaxDelayMs);
+
+                _logger.LogError(ex,
+                    "Error accepting client connection (attempt {Count}), retrying in {DelayMs}ms",
+                    consecutiveErrors, delayMs);
+                await Task.Delay(delayMs, ct);
             }
+        }
+    }
+
+    /// <summary>
+    /// Background drain loop — reads broadcast messages from the bounded channel and
+    /// fans each one out to all connected clients in parallel with per-client timeouts.
+    /// The producer (BroadcastAsync) is never blocked by a slow or stalled client.
+    /// </summary>
+    private async Task DrainBroadcastChannelAsync(CancellationToken ct)
+    {
+        await foreach (var message in _broadcastChannel.Reader.ReadAllAsync(ct))
+        {
+            var connected = _clients
+                .Where(kvp => kvp.Value.Stream.IsConnected)
+                .ToList();
+
+            if (connected.Count == 0) continue;
+
+            // Fire all per-client sends in parallel; don't await the aggregate — if one
+            // client's timeout fires and disconnects it, the others are unaffected.
+            _ = Task.WhenAll(connected.Select(
+                kvp => SendWithTimeoutAsync(kvp.Key, kvp.Value, message, ct)));
         }
     }
 
@@ -97,10 +153,8 @@ public class NamedPipeServer
 
                 var messageLength = BitConverter.ToInt32(lengthBuffer, 0);
                 // Guard against malformed frames: a negative, zero, or unreasonably large length
-                // would cause an out-of-memory allocation.  10 MB is a generous upper bound for
-                // a single IPC message; adjust if larger payloads are ever needed.
-                const int MaxMessageBytes = 10 * 1024 * 1024;
-                if (messageLength <= 0 || messageLength > MaxMessageBytes)
+                // would cause an out-of-memory allocation. Limit is configurable via CommunicationConfig.
+                if (messageLength <= 0 || messageLength > _config.MaxMessageSizeBytes)
                 {
                     _logger.LogWarning(
                         "Client {ClientId} sent invalid frame length {Len}; closing connection",
@@ -116,6 +170,24 @@ public class NamedPipeServer
 
                 var response = await _messageHandler.HandleAsync(message, ct);
                 await SendWithLockAsync(entry, response, ct);
+
+                // After a SubmitTask succeeds, register this client as the streaming-output owner
+                if (message.Type == MessageTypes.SubmitTask
+                    && response.Type == MessageTypes.TaskUpdate
+                    && response.Payload is { Length: > 0 })
+                {
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(response.Payload);
+                        if (doc.RootElement.TryGetProperty("taskId", out var idEl))
+                        {
+                            var taskId = idEl.GetString();
+                            if (!string.IsNullOrEmpty(taskId))
+                                _taskOwners[taskId] = clientId;
+                        }
+                    }
+                    catch { /* silently ignore parse errors */ }
+                }
             }
         }
         catch (OperationCanceledException) { }
@@ -126,17 +198,61 @@ public class NamedPipeServer
         finally
         {
             _clients.TryRemove(clientId, out _);
+            // Remove all task-owner entries for this client so we don't try to route to a dead pipe
+            foreach (var kvp in _taskOwners.Where(k => k.Value == clientId).ToList())
+                _taskOwners.TryRemove(kvp.Key, out _);
             await stream.DisposeAsync();
             _logger.LogInformation("Client {ClientId} disconnected", clientId);
         }
     }
 
-    public async Task BroadcastAsync(PipeMessage message, CancellationToken ct = default)
+    /// <summary>Returns the clientId that owns a task, or null if not tracked.</summary>
+    public string? GetTaskOwner(string taskId) =>
+        _taskOwners.TryGetValue(taskId, out var clientId) ? clientId : null;
+
+    /// <summary>
+    /// Send a message to one specific client (point-to-point, bypasses broadcast channel).
+    /// Used for streaming output routed to the task owner.
+    /// </summary>
+    public async Task SendToClientAsync(string clientId, PipeMessage message, CancellationToken ct = default)
     {
-        var tasks = _clients.Values
-            .Where(e => e.Stream.IsConnected)
-            .Select(e => SendWithLockAsync(e, message, ct));
-        await Task.WhenAll(tasks);
+        if (_clients.TryGetValue(clientId, out var entry) && entry.Stream.IsConnected)
+            await SendWithTimeoutAsync(clientId, entry, message, ct);
+    }
+
+    /// <summary>
+    /// C4: Non-blocking broadcast — enqueues into the bounded channel and returns immediately.
+    /// The drain loop fans the message out to all connected clients asynchronously.
+    /// If the channel is full, the oldest undelivered message is dropped (DropOldest policy).
+    /// </summary>
+    public Task BroadcastAsync(PipeMessage message, CancellationToken ct = default)
+    {
+        if (!_broadcastChannel.Writer.TryWrite(message))
+            _logger.LogWarning("Broadcast channel full; dropped oldest message (type={Type})", message.Type);
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Wraps SendWithLockAsync with a per-client timeout so a stalled write
+    /// cannot block the drain loop for other clients.
+    /// </summary>
+    private async Task SendWithTimeoutAsync(string clientId, ClientEntry entry, PipeMessage message, CancellationToken ct)
+    {
+        using var timeoutCts = new CancellationTokenSource(
+            TimeSpan.FromSeconds(_config.PerClientBroadcastTimeoutSec));
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        try
+        {
+            await SendWithLockAsync(entry, message, linkedCts.Token);
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Broadcast to client {ClientId} timed out after {Sec}s; disconnecting stalled client",
+                clientId, _config.PerClientBroadcastTimeoutSec);
+            _clients.TryRemove(clientId, out _);
+            await entry.Stream.DisposeAsync();
+        }
     }
 
     // All writes go through here so the per-client SemaphoreSlim prevents interleaved frames.
@@ -164,6 +280,7 @@ public class NamedPipeServer
 
     public async Task StopAsync()
     {
+        _broadcastChannel.Writer.Complete();
         _cts?.Cancel();
         foreach (var entry in _clients.Values)
         {

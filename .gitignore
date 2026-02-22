@@ -1,17 +1,38 @@
 # Build outputs
-**/bin/
-**/obj/
-**/Debug/
-**/debug/
-**/out/
+bin/
+obj/
+out/
+dist/
+
+# Dependencies
+node_modules/
+packages/
+
+# IDE
+.vs/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
 
 # Logs
-**/logs/
-**/log/
 *.log
+logs/
 
-# Node
-**/node_modules/
+# Database
+*.db
+*.db-shm
+*.db-wal
 
-# VS Code extension package
-src/vscode-extension/sag-ide-0.1.0.vsix
+# Environment
+.env
+.env.local
+appsettings.Development.json
+
+# Extension
+*.vsix
+
+# Cache
+.cache/

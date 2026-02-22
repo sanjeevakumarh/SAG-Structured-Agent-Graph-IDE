@@ -60,6 +60,14 @@ export class StreamingOutputPanel {
         }
     }
 
+    /** Signal cancellation to the webview — stops the cursor and shows a 'Cancelled' status line. */
+    static cancel(taskId: string): void {
+        const instance = StreamingOutputPanel.panels.get(taskId);
+        if (!instance) { return; }
+        instance.panel.webview.postMessage({ command: 'cancelled' });
+        instance.panel.title = instance.panel.title.replace('⟳', '✗');
+    }
+
     static closeAll(): void {
         for (const p of StreamingOutputPanel.panels.values()) {
             p.panel.dispose();
@@ -163,6 +171,9 @@ function getHtml(): string {
         ? \`Done — \${fullText.length.toLocaleString()} chars received\`
         : \`Receiving... \${fullText.length.toLocaleString()} chars (\${chunkCount} chunks)\`;
       if (done) { cursor.className = 'hidden'; }
+    } else if (command === 'cancelled') {
+      cursor.className = 'hidden';
+      status.textContent = \`Cancelled — \${fullText.length.toLocaleString()} chars received (partial output)\`;
     }
   });
 

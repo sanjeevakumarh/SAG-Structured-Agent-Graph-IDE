@@ -1,0 +1,22 @@
+name: "TDD Workflow"
+description: "Write failing tests first, then implement code to make them pass."
+steps:
+  - id: write_tests
+    agent: Tester
+    prompt: "Write failing unit tests that specify the expected behavior. Do NOT implement the code yet."
+  - id: implement
+    agent: Coder
+    depends_on: [write_tests]
+    prompt: "Implement code to make these tests pass:\n\n{{write_tests.output}}"
+  - id: check_router
+    type: router
+    depends_on: [implement]
+    branches:
+      - condition: "hasIssues"
+        target: implement
+      - condition: "success"
+        target: refactor
+  - id: refactor
+    agent: Coder
+    depends_on: [implement]
+    prompt: "Refactor this code for clarity and maintainability:\n\n{{implement.output}}"

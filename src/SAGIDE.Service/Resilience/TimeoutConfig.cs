@@ -66,25 +66,19 @@ public class AgentLimitEntry
 public class TaskAffinityEntry
 {
     public string LocalModel    { get; init; } = string.Empty;
-    public string CloudProvider { get; init; } = "Claude";
-    public string CloudModel    { get; init; } = "claude-sonnet-4-6";
+    public string CloudProvider { get; init; } = string.Empty;
+    public string CloudModel    { get; init; } = string.Empty;
 }
 
 public class TaskAffinitiesConfig
 {
-    public Dictionary<string, TaskAffinityEntry> Affinities { get; init; } = new()
-    {
-        ["CodeReview"]    = new() { LocalModel = "qwen2.5-coder:7b-instruct", CloudProvider = "Claude",  CloudModel = "claude-sonnet-4-6" },
-        ["TestGeneration"]= new() { LocalModel = "qwen2.5-coder:7b-instruct", CloudProvider = "Codex",   CloudModel = "gpt-4o" },
-        ["Refactoring"]   = new() { LocalModel = "deepseek-coder:6.7b",        CloudProvider = "Gemini",  CloudModel = "gemini-2.0-flash" },
-        ["Debug"]         = new() { LocalModel = "qwen2.5-coder:7b-instruct", CloudProvider = "Claude",  CloudModel = "claude-sonnet-4-6" },
-        ["Documentation"] = new() { LocalModel = "phi3.5:latest",              CloudProvider = "Codex",   CloudModel = "gpt-4o-mini" },
-        ["SecurityReview"]= new() { LocalModel = "qwen2.5-coder:7b-instruct", CloudProvider = "Claude",  CloudModel = "claude-sonnet-4-6" },
-    };
+    // Intentionally empty — all values come from appsettings.json (SAGIDE:TaskAffinities:Affinities).
+    public Dictionary<string, TaskAffinityEntry> Affinities { get; init; } = new();
 
     /// <summary>
     /// Returns (provider, modelId) for the given agent type.
     /// preferLocal=true selects the Ollama model; otherwise the cloud model is returned.
+    /// Returns (string.Empty, string.Empty) when no affinity is configured.
     /// </summary>
     public (string Provider, string ModelId) GetDefaultFor(AgentType agentType, bool preferLocal = false)
     {
@@ -95,7 +89,7 @@ public class TaskAffinitiesConfig
             if (!string.IsNullOrEmpty(entry.CloudModel))
                 return (entry.CloudProvider, entry.CloudModel);
         }
-        return ("Claude", "claude-sonnet-4-6");
+        return (string.Empty, string.Empty);
     }
 }
 

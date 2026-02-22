@@ -13,7 +13,7 @@ namespace SAGIDE.Service.Orchestrator;
 /// DAG-based workflow execution engine.
 ///
 /// Responsibilities:
-///   - Sequential and parallel step submission via AgentOrchestrator
+///   - Sequential and parallel step submission via ITaskSubmissionService
 ///   - Conditional routing (router nodes evaluated synchronously)
 ///   - Feedback loops (next: back-edges) capped by both YAML max_iterations and
 ///     the global AgentLimits:MaxIterations configuration value
@@ -25,13 +25,13 @@ namespace SAGIDE.Service.Orchestrator;
 ///   - SQLite persistence: instances survive service restarts
 ///
 /// Cancel behaviour (Item 2):
-///   CancelAsync() calls AgentOrchestrator.CancelTaskAsync() for every task that has
+///   CancelAsync() calls ITaskSubmissionService.CancelTaskAsync() for every task that has
 ///   been submitted (whether it is still Queued or actively Running in the orchestrator),
 ///   then marks all remaining Pending steps as Skipped.
 /// </summary>
 public class WorkflowEngine
 {
-    private readonly AgentOrchestrator _orchestrator;
+    private readonly ITaskSubmissionService _orchestrator;
     private readonly WorkflowDefinitionLoader _loader;
     private readonly AgentLimitsConfig _agentLimitsConfig;
     private readonly TaskAffinitiesConfig _taskAffinitiesConfig;
@@ -50,8 +50,15 @@ public class WorkflowEngine
 
     public event Action<WorkflowInstance>? OnWorkflowUpdate;
 
+    /// <summary>
+    /// Raised when a human_approval step becomes active, or when the convergence
+    /// policy escalates to HUMAN_APPROVAL after max iterations are exceeded.
+    /// Parameters: (instanceId, stepId, promptText)
+    /// </summary>
+    public event Action<string, string, string>? OnApprovalNeeded;
+
     public WorkflowEngine(
-        AgentOrchestrator orchestrator,
+        ITaskSubmissionService orchestrator,
         WorkflowDefinitionLoader loader,
         AgentLimitsConfig agentLimitsConfig,
         TaskAffinitiesConfig taskAffinitiesConfig,
@@ -88,6 +95,7 @@ public class WorkflowEngine
             DefaultModelProvider = req.DefaultModelProvider,
             ModelEndpoint        = req.ModelEndpoint,
             WorkspacePath        = req.WorkspacePath,
+            StepModelOverrides   = req.StepModelOverrides ?? [],
         };
 
         // Apply parameter defaults for any missing inputs
@@ -169,8 +177,8 @@ public class WorkflowEngine
                 var exec = inst.StepExecutions[step.Id];
                 if (exec.Status == WorkflowStepStatus.Running)
                 {
-                    exec.Status = WorkflowStepStatus.Failed;
-                    exec.Error  = "Service restarted while tool step was running; process lost.";
+                    exec.Error = "Service restarted while tool step was running; process lost.";
+                    RecordAudit(exec, WorkflowStepStatus.Failed, exec.Error);
                     SkipDownstream(step.Id, inst, def);
                 }
             }
@@ -217,27 +225,27 @@ public class WorkflowEngine
             switch (status.Status)
             {
                 case AgentTaskStatus.Running:
-                    stepExec.Status    = WorkflowStepStatus.Running;
+                    RecordAudit(stepExec, WorkflowStepStatus.Running);
                     stepExec.StartedAt = status.StartedAt;
                     BroadcastUpdate(inst);
                     return; // more updates will come
 
                 case AgentTaskStatus.Completed:
-                    stepExec.Status      = WorkflowStepStatus.Completed;
                     stepExec.Output      = status.Result?.Output;
                     stepExec.IssueCount  = status.Result?.Issues?.Count ?? 0;
                     stepExec.CompletedAt = status.CompletedAt;
+                    RecordAudit(stepExec, WorkflowStepStatus.Completed);
                     break;
 
                 case AgentTaskStatus.Failed:
-                    stepExec.Status      = WorkflowStepStatus.Failed;
                     stepExec.Error       = status.StatusMessage;
                     stepExec.CompletedAt = status.CompletedAt;
+                    RecordAudit(stepExec, WorkflowStepStatus.Failed, status.StatusMessage);
                     SkipDownstream(stepId, inst, def);
                     break;
 
                 case AgentTaskStatus.Cancelled:
-                    stepExec.Status = WorkflowStepStatus.Skipped;
+                    RecordAudit(stepExec, WorkflowStepStatus.Skipped, "Task cancelled");
                     SkipDownstream(stepId, inst, def);
                     break;
 
@@ -350,6 +358,114 @@ public class WorkflowEngine
         finally { lk.Release(); }
     }
 
+    // ── Human approval gate API ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Called when the user approves or rejects a human_approval gate step.
+    /// On approval: the step is marked Completed and downstream DAG evaluation resumes.
+    /// On rejection: the step is marked Rejected and downstream steps are skipped.
+    /// </summary>
+    public async Task ApproveWorkflowStepAsync(
+        string instanceId, string stepId, bool approved, string? comment,
+        CancellationToken ct = default)
+    {
+        if (!_active.TryGetValue(instanceId, out var entry))
+        {
+            _logger.LogWarning("ApproveWorkflowStep: instance '{Id}' not found", instanceId);
+            return;
+        }
+
+        var (inst, def) = entry;
+        var lk = _locks[instanceId];
+        await lk.WaitAsync(ct);
+        try
+        {
+            var stepExec = inst.StepExecutions.GetValueOrDefault(stepId);
+            if (stepExec is null || stepExec.Status != WorkflowStepStatus.WaitingForApproval)
+            {
+                _logger.LogWarning(
+                    "ApproveWorkflowStep: step '{StepId}' not in WaitingForApproval state (current: {Status})",
+                    stepId, stepExec?.Status);
+                return;
+            }
+
+            stepExec.CompletedAt = DateTime.UtcNow;
+
+            if (approved)
+            {
+                stepExec.Output = string.IsNullOrWhiteSpace(comment) ? "Approved" : $"Approved: {comment}";
+                RecordAudit(stepExec, WorkflowStepStatus.Completed, stepExec.Output);
+                _logger.LogInformation(
+                    "Workflow {Id} step '{StepId}' approved by user", instanceId, stepId);
+
+                // Resume the DAG from this step
+                if (inst.IsPaused)
+                {
+                    inst.IsPaused = false;
+                    inst.Status   = WorkflowStatus.Running;
+                }
+                await EvaluateNextStepsAsync(inst, def, stepId);
+            }
+            else
+            {
+                var rejectReason = string.IsNullOrWhiteSpace(comment) ? "Rejected by user" : $"Rejected: {comment}";
+                stepExec.Error = rejectReason;
+                RecordAudit(stepExec, WorkflowStepStatus.Rejected, rejectReason);
+                _logger.LogInformation(
+                    "Workflow {Id} step '{StepId}' rejected by user", instanceId, stepId);
+                SkipDownstream(stepId, inst, def);
+            }
+
+            if (IsInstanceDone(inst, def))
+            {
+                inst.Status      = inst.StepExecutions.Values.Any(s => s.Status is WorkflowStepStatus.Failed or WorkflowStepStatus.Rejected)
+                                     ? WorkflowStatus.Failed
+                                     : WorkflowStatus.Completed;
+                inst.CompletedAt = DateTime.UtcNow;
+            }
+
+            await PersistInstanceAsync(inst);
+            BroadcastUpdate(inst);
+        }
+        finally { lk.Release(); }
+    }
+
+    private void ScheduleApprovalTimeout(
+        string instanceId, string stepId, int slaHours, string timeoutAction, CancellationToken ct)
+    {
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromHours(slaHours), ct);
+            if (!_active.TryGetValue(instanceId, out var entry)) return;
+
+            var (inst, def) = entry;
+            var lk = _locks[instanceId];
+            await lk.WaitAsync(ct);
+            try
+            {
+                var stepExec = inst.StepExecutions.GetValueOrDefault(stepId);
+                if (stepExec?.Status != WorkflowStepStatus.WaitingForApproval) return;
+
+                _logger.LogWarning(
+                    "Workflow {Id} step '{StepId}' SLA ({Hrs}h) exceeded — action: {Action}",
+                    instanceId, stepId, slaHours, timeoutAction);
+
+                var slaReason = $"SLA of {slaHours} hour(s) exceeded with no human response.";
+                stepExec.Error       = slaReason;
+                stepExec.CompletedAt = DateTime.UtcNow;
+                RecordAudit(stepExec, WorkflowStepStatus.Failed, slaReason);
+                SkipDownstream(stepId, inst, def);
+
+                inst.Status      = WorkflowStatus.Failed;
+                inst.CompletedAt = DateTime.UtcNow;
+
+                await PersistInstanceAsync(inst);
+                BroadcastUpdate(inst);
+            }
+            finally { lk.Release(); }
+        }, ct);
+    }
+
     // ── Cancel (Item 2 — explicit task cancellation) ───────────────────────────
 
     public async Task CancelAsync(string instanceId, CancellationToken ct = default)
@@ -368,17 +484,23 @@ public class WorkflowEngine
                      && s.Status is WorkflowStepStatus.Running or WorkflowStepStatus.Pending)
             .ToList();
 
+        var submittedTaskIds = submittedSteps
+            .Select(s => s.TaskId!)
+            .Select(id => id[..Math.Min(8, id.Length)])
+            .ToList();
+
         _logger.LogInformation(
             "Workflow '{Name}' cancelled (instance {Id}) — cancelling {N} active task(s): {TaskIds}",
             inst.DefinitionName, instanceId, submittedSteps.Count,
-            string.Join(", ", submittedSteps.Select(s => s.TaskId![..Math.Min(8, s.TaskId.Length)])));
+            string.Join(", ", submittedTaskIds));
 
         foreach (var stepExec in submittedSteps)
             await _orchestrator.CancelTaskAsync(stepExec.TaskId!, ct);
 
-        // Skip all steps that haven't started yet
-        foreach (var stepExec in inst.StepExecutions.Values.Where(s => s.Status == WorkflowStepStatus.Pending))
-            stepExec.Status = WorkflowStepStatus.Skipped;
+        // Skip all steps that haven't started yet; resolve approval gates
+        foreach (var stepExec in inst.StepExecutions.Values
+                     .Where(s => s.Status is WorkflowStepStatus.Pending or WorkflowStepStatus.WaitingForApproval))
+            RecordAudit(stepExec, WorkflowStepStatus.Skipped, "Workflow cancelled");
 
         await PersistInstanceAsync(inst);
         BroadcastUpdate(inst);
@@ -426,14 +548,57 @@ public class WorkflowEngine
             {
                 var loopTargetExec = inst.StepExecutions[loopTargetDef.Id];
                 var agentType      = WorkflowDefinitionLoader.MapAgentName(loopTargetDef.Agent ?? loopTargetDef.Id);
+                var policy         = def.ConvergencePolicy;
 
-                // Item 1: enforce BOTH the YAML per-step cap AND the global AgentLimits cap
-                var yamlMax   = completedStep.MaxIterations;
-                var globalMax = _agentLimitsConfig.GetMaxIterations(agentType);
+                var yamlMax      = completedStep.MaxIterations;
+                var globalMax    = _agentLimitsConfig.GetMaxIterations(agentType);
                 var effectiveMax = Math.Min(yamlMax, globalMax);
+                var escalationTarget = (policy?.EscalationTarget ?? "CANCEL").ToUpperInvariant();
+
+                // ── Early-escalation checks (run before iteration cap) ─────
+
+                // timeout_per_iteration_sec: wall-clock elapsed since the loop target last started
+                if (policy?.TimeoutPerIterationSec > 0 && loopTargetExec.StartedAt.HasValue)
+                {
+                    var elapsed = (DateTime.UtcNow - loopTargetExec.StartedAt.Value).TotalSeconds;
+                    if (elapsed > policy.TimeoutPerIterationSec)
+                    {
+                        var msg = $"Iteration {loopTargetExec.Iteration} exceeded the " +
+                            $"{policy.TimeoutPerIterationSec}s per-iteration timeout ({elapsed:F0}s elapsed).";
+                        _logger.LogWarning(
+                            "Workflow {Id} step '{Target}' per-iteration timeout — escalating",
+                            inst.InstanceId, loopTargetDef.Id);
+                        await EscalateLoopAsync(inst, def, loopTargetDef, loopTargetExec,
+                            agentType, msg, escalationTarget);
+                        return;
+                    }
+                }
+
+                // contradiction_detection: issues not decreasing → mutually exclusive constraints
+                if (policy?.ContradictionDetection == true
+                    && loopTargetExec.Iteration > 1
+                    && completedExec.IssueCount > 0
+                    && completedExec.IssueCount >= loopTargetExec.PreviousIssueCount)
+                {
+                    var msg = $"Contradiction detected at iteration {loopTargetExec.Iteration}: " +
+                        $"{completedExec.IssueCount} issue(s) ≥ prior {loopTargetExec.PreviousIssueCount} — " +
+                        "constraints may be mutually exclusive.";
+                    _logger.LogWarning(
+                        "Workflow {Id} step '{Target}' contradiction detected — escalating to HUMAN_APPROVAL",
+                        inst.InstanceId, loopTargetDef.Id);
+                    // contradiction always escalates to HUMAN_APPROVAL regardless of escalation_target
+                    await EscalateLoopAsync(inst, def, loopTargetDef, loopTargetExec,
+                        agentType, msg, "HUMAN_APPROVAL");
+                    return;
+                }
+
+                // ── Normal iteration cap check ──────────────────────────────────
 
                 if (loopTargetExec.Iteration < effectiveMax)
                 {
+                    // Save current issue count before advancing so the next cycle can detect contradiction
+                    loopTargetExec.PreviousIssueCount = completedExec.IssueCount;
+
                     loopTargetExec.Iteration++;
                     loopTargetExec.Status = WorkflowStepStatus.Pending;
                     loopTargetExec.Output = null;
@@ -444,24 +609,31 @@ public class WorkflowEngine
                         inst.InstanceId, loopTargetDef.Id,
                         loopTargetExec.Iteration, yamlMax, globalMax);
 
+                    // partial_retry_scope: reset additional steps depending on scope
+                    var scope = (policy?.PartialRetryScope ?? "FAILING_NODES_ONLY").ToUpperInvariant();
+                    if (scope == "FULL_WORKFLOW")
+                        ResetAllStepsForNewIteration(loopTargetDef.Id, inst, def);
+                    else if (scope == "FROM_CODEGEN")
+                        ResetLoopBodyForNewIteration(loopTargetDef.Id, inst, def);
+                    // FAILING_NODES_ONLY: only the loop target was reset above (default behaviour)
+
+                    //  ConvergenceHintMemory — inject causal context from the prior iteration
+                    if (policy?.ConvergenceHintMemory == true)
+                        InjectConvergenceHints(completedStep, completedExec, loopTargetExec, inst);
+
                     await SubmitStepAsync(loopTargetDef, inst, def, CancellationToken.None);
                     return; // wait for loop target to complete before advancing downstream
                 }
                 else
                 {
-                    // Global or YAML iteration cap hit — abort the workflow with a clear error
-                    _logger.LogWarning(
-                        "Workflow {Id} step '{Target}' hit max iterations (YAML: {Yaml}, Global: {Global}) — aborting",
-                        inst.InstanceId, loopTargetDef.Id, yamlMax, globalMax);
-
-                    inst.Status      = WorkflowStatus.Failed;
-                    inst.CompletedAt = DateTime.UtcNow;
-                    loopTargetExec.Error =
+                    var capMessage =
                         $"Max iterations reached ({effectiveMax}): step '{loopTargetDef.Id}' " +
-                        $"exceeded the configured limit. Increase AgentLimits:{agentType}:MaxIterations " +
-                        $"or the step's max_iterations to allow more iterations.";
-                    loopTargetExec.Status = WorkflowStepStatus.Failed;
-                    SkipDownstream(loopTargetDef.Id, inst, def);
+                        $"exceeded the configured limit (YAML: {yamlMax}, global: {globalMax}).";
+                    _logger.LogWarning(
+                        "Workflow {Id} step '{Target}' hit max iterations (YAML: {Yaml}, Global: {Global}) — escalating",
+                        inst.InstanceId, loopTargetDef.Id, yamlMax, globalMax);
+                    await EscalateLoopAsync(inst, def, loopTargetDef, loopTargetExec,
+                        agentType, capMessage, escalationTarget);
                     return;
                 }
             }
@@ -499,7 +671,7 @@ public class WorkflowEngine
 
             foreach (var router in readyRouters)
             {
-                inst.StepExecutions[router.Id].Status = WorkflowStepStatus.Completed;
+                RecordAudit(inst.StepExecutions[router.Id], WorkflowStepStatus.Completed, "Router evaluated");
                 var targetId = EvaluateRouter(router, inst);
                 if (targetId is not null)
                 {
@@ -523,8 +695,55 @@ public class WorkflowEngine
                 ExecuteConstraintStep(constraint, inst, def);
                 anySync = true;
             }
+
+            // Context retrieval (synchronous aggregation, no I/O)
+            var readyCtxRetrieval = def.Steps
+                .Where(s => s.Type == "context_retrieval"
+                         && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
+                         && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
+                                                 && e.Status == WorkflowStepStatus.Completed))
+                .ToList();
+
+            foreach (var ctxStep in readyCtxRetrieval)
+            {
+                ExecuteContextRetrievalStep(ctxStep, inst);
+                anySync = true;
+            }
         }
         while (anySync);
+
+        // ── Phase 1b: activate human_approval gates ──────────────────────────
+        // When all dependencies are complete the gate transitions to WaitingForApproval
+        // and the workflow is effectively paused for that branch until approved/rejected.
+        var readyApprovals = def.Steps
+            .Where(s => s.Type == "human_approval"
+                     && inst.StepExecutions[s.Id].Status == WorkflowStepStatus.Pending
+                     && s.DependsOn.All(d => inst.StepExecutions.TryGetValue(d, out var e)
+                                             && e.Status == WorkflowStepStatus.Completed))
+            .ToList();
+
+        foreach (var approvalStep in readyApprovals)
+        {
+            var stepExec = inst.StepExecutions[approvalStep.Id];
+            var prompt   = approvalStep.ApprovalPrompt is not null
+                ? PromptTemplateEngine.Resolve(approvalStep.ApprovalPrompt, inst.InputContext, inst.StepExecutions)
+                : $"Please review the workflow '{inst.DefinitionName}' and approve or reject step '{approvalStep.Id}'.";
+
+            stepExec.StartedAt = DateTime.UtcNow;
+            stepExec.Output    = prompt;  // prompt visible in the UI
+            RecordAudit(stepExec, WorkflowStepStatus.WaitingForApproval, "Awaiting human decision");
+
+            _logger.LogInformation(
+                "Workflow {Id} step '{StepId}' is waiting for human approval", inst.InstanceId, approvalStep.Id);
+
+            await PersistInstanceAsync(inst);
+            OnWorkflowUpdate?.Invoke(inst);
+            OnApprovalNeeded?.Invoke(inst.InstanceId, approvalStep.Id, prompt);
+
+            // Schedule SLA timeout if configured
+            if (approvalStep.SlaHours > 0)
+                ScheduleApprovalTimeout(inst.InstanceId, approvalStep.Id, approvalStep.SlaHours, approvalStep.TimeoutAction, ct);
+        }
 
         // ── Phase 2: submit async steps (tools + agents) ──────────────────────
 
@@ -560,8 +779,8 @@ public class WorkflowEngine
         if (!policyResult.IsAllowed)
         {
             var stepExec = inst.StepExecutions[stepDef.Id];
-            stepExec.Status = WorkflowStepStatus.Failed;
-            stepExec.Error  = $"[Policy] {policyResult.DenyReason}";
+            stepExec.Error = $"[Policy] {policyResult.DenyReason}";
+            RecordAudit(stepExec, WorkflowStepStatus.Failed, stepExec.Error);
             SkipDownstream(stepDef.Id, inst, def);
             _logger.LogWarning(
                 "Workflow {Id} step '{StepId}' blocked by policy: {Reason}",
@@ -576,11 +795,33 @@ public class WorkflowEngine
         var basePrompt    = stepDef.Prompt ?? $"Process the following with a {stepDef.Agent ?? stepDef.Id} agent.";
         var resolvedPrompt = PromptTemplateEngine.Resolve(basePrompt, inst.InputContext, inst.StepExecutions);
 
-        // Item 6: Smart Router — step override → instance default → TaskAffinities
-        var agentType     = WorkflowDefinitionLoader.MapAgentName(stepDef.Agent ?? stepDef.Id);
-        var modelProvider = stepDef.ModelProvider ?? inst.DefaultModelProvider;
-        var modelId       = stepDef.ModelId       ?? inst.DefaultModelId;
+        // Model resolution chain:
+        //   1. YAML-baked step model (author explicit override — highest priority)
+        //   2. Launch-time per-step override (user chose at workflow launch)
+        //   3. Instance default model (the "global" pick at launch)
+        //   4. TaskAffinities config (lowest — configured default per agent type)
+        var agentType = WorkflowDefinitionLoader.MapAgentName(stepDef.Agent ?? stepDef.Id);
 
+        // Start from YAML values (may be null/empty — filled by lower-priority tiers below)
+        var modelProvider = stepDef.ModelProvider;
+        var modelId       = stepDef.ModelId;
+        string? modelEndpoint = null;
+
+        // Tier 2: launch-time step override (only applied when YAML didn't lock the model)
+        if (string.IsNullOrEmpty(modelId) &&
+            inst.StepModelOverrides.TryGetValue(stepDef.Id, out var stepOverride) &&
+            !string.IsNullOrEmpty(stepOverride.ModelId))
+        {
+            modelProvider = stepOverride.Provider;
+            modelId       = stepOverride.ModelId;
+            modelEndpoint = stepOverride.Endpoint;
+        }
+
+        // Tier 3: instance default
+        if (string.IsNullOrEmpty(modelProvider)) modelProvider = inst.DefaultModelProvider;
+        if (string.IsNullOrEmpty(modelId))       modelId       = inst.DefaultModelId;
+
+        // Tier 4: TaskAffinities
         if (string.IsNullOrEmpty(modelProvider) || string.IsNullOrEmpty(modelId))
         {
             var (affinityProvider, affinityModel) = _taskAffinitiesConfig.GetDefaultFor(agentType);
@@ -610,8 +851,10 @@ public class WorkflowEngine
             }
         };
 
-        if (!string.IsNullOrEmpty(inst.ModelEndpoint))
-            task.Metadata["modelEndpoint"] = inst.ModelEndpoint;
+        // Endpoint priority: step override endpoint → instance endpoint
+        var effectiveEndpoint = modelEndpoint ?? inst.ModelEndpoint;
+        if (!string.IsNullOrEmpty(effectiveEndpoint))
+            task.Metadata["modelEndpoint"] = effectiveEndpoint;
 
         var taskId = await _orchestrator.SubmitTaskAsync(task, ct);
 
@@ -621,8 +864,8 @@ public class WorkflowEngine
         // Update step execution state
         var exec     = inst.StepExecutions[stepDef.Id];
         exec.TaskId    = taskId;
-        exec.Status    = WorkflowStepStatus.Running;
         exec.StartedAt = DateTime.UtcNow;
+        RecordAudit(exec, WorkflowStepStatus.Running, $"Submitted as task {taskId[..Math.Min(8, taskId.Length)]}");
 
         _logger.LogInformation(
             "Workflow {InstanceId} submitted step '{StepId}' as task {TaskId} ({Agent} via {Provider}/{Model})",
@@ -690,7 +933,7 @@ public class WorkflowEngine
     private void ExecuteConstraintStep(WorkflowStepDef stepDef, WorkflowInstance inst, WorkflowDefinition def)
     {
         var exec = inst.StepExecutions[stepDef.Id];
-        exec.Status    = WorkflowStepStatus.Running;
+        RecordAudit(exec, WorkflowStepStatus.Running);
         exec.StartedAt = DateTime.UtcNow;
 
         var (passed, reason) = EvaluateConstraintExpr(stepDef.ConstraintExpr ?? "", inst);
@@ -699,23 +942,23 @@ public class WorkflowEngine
 
         if (passed)
         {
-            exec.Status = WorkflowStepStatus.Completed;
+            RecordAudit(exec, WorkflowStepStatus.Completed, reason);
             _logger.LogInformation(
                 "Workflow {Id} constraint '{StepId}' passed: {Reason}",
                 inst.InstanceId, stepDef.Id, reason);
         }
         else if (stepDef.OnConstraintFail.Equals("warn", StringComparison.OrdinalIgnoreCase))
         {
-            exec.Status     = WorkflowStepStatus.Completed;
             exec.IssueCount = 1;
+            RecordAudit(exec, WorkflowStepStatus.Completed, $"warn: {reason}");
             _logger.LogWarning(
                 "Workflow {Id} constraint '{StepId}' failed (warn): {Reason}",
                 inst.InstanceId, stepDef.Id, reason);
         }
         else
         {
-            exec.Status = WorkflowStepStatus.Failed;
-            exec.Error  = $"Constraint failed: {reason}";
+            exec.Error = $"Constraint failed: {reason}";
+            RecordAudit(exec, WorkflowStepStatus.Failed, exec.Error);
             SkipDownstream(stepDef.Id, inst, def);
             _logger.LogWarning(
                 "Workflow {Id} constraint '{StepId}' failed: {Reason}",
@@ -723,19 +966,69 @@ public class WorkflowEngine
         }
     }
 
+    // ── Context-retrieval step execution ──────────────────────────────────────
+
+    /// <summary>
+    ///  ContextRetrievalNode: aggregates outputs from source_steps and injects
+    /// the concatenated text into inst.InputContext[context_var_name].
+    /// Runs synchronously in the constraint drain loop — no I/O required.
+    /// Downstream prompts can reference the result via {{context_var_name}}.
+    /// </summary>
+    private void ExecuteContextRetrievalStep(WorkflowStepDef stepDef, WorkflowInstance inst)
+    {
+        var exec = inst.StepExecutions[stepDef.Id];
+        RecordAudit(exec, WorkflowStepStatus.Running);
+        exec.StartedAt = DateTime.UtcNow;
+
+        var sb = new System.Text.StringBuilder();
+        var found = new List<string>();
+        var missing = new List<string>();
+
+        foreach (var srcId in stepDef.SourceSteps)
+        {
+            if (inst.StepExecutions.TryGetValue(srcId, out var srcExec) &&
+                !string.IsNullOrEmpty(srcExec.Output))
+            {
+                if (sb.Length > 0) sb.AppendLine();
+                sb.AppendLine($"=== {srcId} ===");
+                sb.Append(srcExec.Output);
+                found.Add(srcId);
+            }
+            else
+            {
+                missing.Add(srcId);
+            }
+        }
+
+        var varName  = stepDef.ContextVarName!;
+        var combined = sb.ToString();
+
+        inst.InputContext[varName] = combined;
+        exec.Output      = combined;
+        exec.CompletedAt = DateTime.UtcNow;
+
+        var summary = $"context_retrieval: '{varName}' populated from [{string.Join(", ", found)}]" +
+            (missing.Count > 0 ? $"; missing/empty: [{string.Join(", ", missing)}]" : "");
+
+        RecordAudit(exec, WorkflowStepStatus.Completed, summary);
+        _logger.LogInformation("Workflow {Id} context_retrieval '{StepId}': {Summary}",
+            inst.InstanceId, stepDef.Id, summary);
+    }
+
     private (bool Passed, string Reason) EvaluateConstraintExpr(string expr, WorkflowInstance inst)
     {
         expr = expr.Trim();
 
-        // exit_code(step_id) == N
-        var m = Regex.Match(expr, @"exit_code\((\w+)\)\s*==\s*(\d+)", RegexOptions.IgnoreCase);
+        // exit_code(step_id) OP N  — supports ==, !=, >=, <=, >, <
+        var m = Regex.Match(expr, @"exit_code\((\w+)\)\s*(==|!=|>=|<=|>|<)\s*(-?\d+)", RegexOptions.IgnoreCase);
         if (m.Success)
         {
             var stepId   = m.Groups[1].Value;
-            var expected = int.Parse(m.Groups[2].Value);
+            var op       = m.Groups[2].Value;
+            var expected = int.Parse(m.Groups[3].Value);
             if (inst.StepExecutions.TryGetValue(stepId, out var e) && e.ExitCode.HasValue)
-                return (e.ExitCode.Value == expected,
-                    $"exit_code({stepId}) = {e.ExitCode.Value} (expected {expected})");
+                return (CompareInts(e.ExitCode.Value, op, expected),
+                    $"exit_code({stepId}) {op} {expected} — actual={e.ExitCode.Value}");
             return (false, $"Step '{stepId}' has no exit code recorded.");
         }
 
@@ -753,20 +1046,132 @@ public class WorkflowEngine
             return (false, $"Step '{stepId}' not found.");
         }
 
-        // issue_count(step_id) == N
-        m = Regex.Match(expr, @"issue_count\((\w+)\)\s*==\s*(\d+)", RegexOptions.IgnoreCase);
+        // issue_count(step_id) OP N  — supports ==, !=, >=, <=, >, <
+        m = Regex.Match(expr, @"issue_count\((\w+)\)\s*(==|!=|>=|<=|>|<)\s*(\d+)", RegexOptions.IgnoreCase);
         if (m.Success)
         {
             var stepId   = m.Groups[1].Value;
-            var expected = int.Parse(m.Groups[2].Value);
+            var op       = m.Groups[2].Value;
+            var expected = int.Parse(m.Groups[3].Value);
             if (inst.StepExecutions.TryGetValue(stepId, out var e))
-                return (e.IssueCount == expected,
-                    $"issue_count({stepId}) = {e.IssueCount} (expected {expected})");
+                return (CompareInts(e.IssueCount, op, expected),
+                    $"issue_count({stepId}) {op} {expected} — actual={e.IssueCount}");
+            return (false, $"Step '{stepId}' not found.");
+        }
+
+        // output_value(step_id) OP N  — extracts first numeric value from output text
+        // Enables TEST_COVERAGE (>= 0.85), PERFORMANCE (< 2.0) constraint types.
+        m = Regex.Match(expr, @"output_value\((\w+)\)\s*(==|!=|>=|<=|>|<)\s*(-?\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+        if (m.Success)
+        {
+            var stepId   = m.Groups[1].Value;
+            var op       = m.Groups[2].Value;
+            var expected = double.Parse(m.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture);
+            if (inst.StepExecutions.TryGetValue(stepId, out var e))
+            {
+                var numMatch = Regex.Match(e.Output ?? "", @"-?\d+(?:\.\d+)?");
+                if (numMatch.Success &&
+                    double.TryParse(numMatch.Value, System.Globalization.NumberStyles.Number,
+                        System.Globalization.CultureInfo.InvariantCulture, out var actual))
+                    return (CompareDoubles(actual, op, expected),
+                        $"output_value({stepId}) {op} {expected} — actual={actual}");
+                return (false, $"Step '{stepId}' output contains no numeric value.");
+            }
+            return (false, $"Step '{stepId}' not found.");
+        }
+
+        // output_value(step_id, 'metric_name') OP N — named metric extraction.
+        // Searches step output for "metric_name: value" or "metric_name=value".
+        // Enables labelled numeric metrics (e.g. output_value(scan, 'high_cves') == 0).
+        m = Regex.Match(expr,
+            @"output_value\((\w+),\s*'([^']+)'\)\s*(==|!=|>=|<=|>|<)\s*(-?\d+(?:\.\d+)?)",
+            RegexOptions.IgnoreCase);
+        if (m.Success)
+        {
+            var stepId     = m.Groups[1].Value;
+            var metricName = m.Groups[2].Value;
+            var op         = m.Groups[3].Value;
+            var expected   = double.Parse(m.Groups[4].Value, System.Globalization.CultureInfo.InvariantCulture);
+            if (inst.StepExecutions.TryGetValue(stepId, out var e))
+            {
+                // Match "metric_name: 3.14" or "metric_name=3.14" (case-insensitive)
+                var pattern  = Regex.Escape(metricName) + @"[:\s=]+(-?\d+(?:\.\d+)?)";
+                var numMatch = Regex.Match(e.Output ?? "", pattern, RegexOptions.IgnoreCase);
+                if (numMatch.Success &&
+                    double.TryParse(numMatch.Groups[1].Value, System.Globalization.NumberStyles.Number,
+                        System.Globalization.CultureInfo.InvariantCulture, out var actual))
+                    return (CompareDoubles(actual, op, expected),
+                        $"output_value({stepId}, '{metricName}') {op} {expected} — actual={actual}");
+                return (false, $"Step '{stepId}' output does not contain metric '{metricName}'.");
+            }
+            return (false, $"Step '{stepId}' not found.");
+        }
+
+        // delta_issues(current_step, baseline_step) OP N — SECURITY_REGRESSION constraint type.
+        // Computes issue_count(current) - issue_count(baseline) and compares against threshold.
+        m = Regex.Match(expr,
+            @"delta_issues\((\w+),\s*(\w+)\)\s*(==|!=|>=|<=|>|<)\s*(-?\d+)",
+            RegexOptions.IgnoreCase);
+        if (m.Success)
+        {
+            var currentId  = m.Groups[1].Value;
+            var baselineId = m.Groups[2].Value;
+            var op         = m.Groups[3].Value;
+            var expected   = int.Parse(m.Groups[4].Value);
+            var hasCurrentStep  = inst.StepExecutions.TryGetValue(currentId, out var current);
+            var hasBaselineStep = inst.StepExecutions.TryGetValue(baselineId, out var baseline);
+            if (!hasCurrentStep)  return (false, $"Step '{currentId}' not found.");
+            if (!hasBaselineStep) return (false, $"Step '{baselineId}' not found.");
+            var delta = current!.IssueCount - baseline!.IssueCount;
+            return (CompareInts(delta, op, expected),
+                $"delta_issues({currentId}, {baselineId}) {op} {expected} — delta={delta} ({current.IssueCount}-{baseline.IssueCount})");
+        }
+
+        // confidence(step_id) OP N — REVIEW_CONFIDENCE constraint type.
+        // Reads IntentPackage.Confidence (0.0–1.0) produced by the agent step.
+        m = Regex.Match(expr,
+            @"confidence\((\w+)\)\s*(==|!=|>=|<=|>|<)\s*(-?\d+(?:\.\d+)?)",
+            RegexOptions.IgnoreCase);
+        if (m.Success)
+        {
+            var stepId   = m.Groups[1].Value;
+            var op       = m.Groups[2].Value;
+            var expected = double.Parse(m.Groups[3].Value, System.Globalization.CultureInfo.InvariantCulture);
+            if (inst.StepExecutions.TryGetValue(stepId, out var e))
+            {
+                var conf = e.IntentPackage?.Confidence;
+                if (conf.HasValue)
+                    return (CompareDoubles(conf.Value, op, expected),
+                        $"confidence({stepId}) {op} {expected} — actual={conf.Value:F3}");
+                return (false, $"Step '{stepId}' has no IntentPackage.Confidence (agent step required).");
+            }
             return (false, $"Step '{stepId}' not found.");
         }
 
         return (false, $"Unrecognised constraint expression: '{expr}'");
     }
+
+    private static bool CompareInts(int actual, string op, int expected) => op switch
+    {
+        "==" => actual == expected,
+        "!=" => actual != expected,
+        ">=" => actual >= expected,
+        "<=" => actual <= expected,
+        ">"  => actual >  expected,
+        "<"  => actual <  expected,
+        _    => false,
+    };
+
+    private static bool CompareDoubles(double actual, string op, double expected) => op switch
+    {
+        "==" => Math.Abs(actual - expected) < 1e-9,
+        "!=" => Math.Abs(actual - expected) >= 1e-9,
+        ">=" => actual >= expected,
+        "<=" => actual <= expected,
+        ">"  => actual >  expected,
+        "<"  => actual <  expected,
+        _    => false,
+    };
 
     // ── Tool step execution ────────────────────────────────────────────────────
 
@@ -778,8 +1183,8 @@ public class WorkflowEngine
     private void ExecuteToolStepInBackground(WorkflowStepDef stepDef, WorkflowInstance inst, WorkflowDefinition def)
     {
         var exec = inst.StepExecutions[stepDef.Id];
-        exec.Status    = WorkflowStepStatus.Running;
         exec.StartedAt = DateTime.UtcNow;
+        RecordAudit(exec, WorkflowStepStatus.Running, $"Command: {stepDef.Command}");
 
         _logger.LogInformation(
             "Workflow {InstanceId} starting tool step '{StepId}': {Command}",
@@ -795,14 +1200,30 @@ public class WorkflowEngine
             ? inst.WorkspacePath ?? Directory.GetCurrentDirectory()
             : PromptTemplateEngine.Resolve(stepDef.WorkingDir, inst.InputContext, inst.StepExecutions);
         var policy     = stepDef.ExitCodePolicy.ToUpperInvariant();
+        var timeoutSec = stepDef.TimeoutSec;
 
         _ = Task.Run(async () =>
         {
             string output;
             int    exitCode;
+            bool   timedOut = false;
+
+            using var toolCts = timeoutSec > 0
+                ? new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSec))
+                : new CancellationTokenSource();
+
             try
             {
-                (output, exitCode) = await RunProcessAsync(command, workingDir);
+                (output, exitCode) = await RunProcessAsync(command, workingDir, toolCts.Token);
+            }
+            catch (OperationCanceledException) when (toolCts.IsCancellationRequested && timeoutSec > 0)
+            {
+                output   = $"Tool step timed out after {timeoutSec}s.";
+                exitCode = -2;
+                timedOut = true;
+                _logger.LogWarning(
+                    "Workflow {Id} tool step '{StepId}' timed out after {Sec}s",
+                    instanceId, stepDef.Id, timeoutSec);
             }
             catch (Exception ex)
             {
@@ -823,22 +1244,28 @@ public class WorkflowEngine
                 liveExec.Output      = output;
                 liveExec.CompletedAt = DateTime.UtcNow;
 
-                if (exitCode == 0 || policy is "IGNORE")
+                if (timedOut)
                 {
-                    liveExec.Status = WorkflowStepStatus.Completed;
+                    liveExec.Error = output; // timeout message
+                    RecordAudit(liveExec, WorkflowStepStatus.Failed, liveExec.Error);
+                    SkipDownstream(stepDef.Id, liveInst, liveDef);
+                }
+                else if (exitCode == 0 || policy is "IGNORE")
+                {
+                    RecordAudit(liveExec, WorkflowStepStatus.Completed, $"exit code {exitCode}");
                 }
                 else if (policy == "WARN_ON_NONZERO")
                 {
-                    liveExec.Status     = WorkflowStepStatus.Completed;
                     liveExec.IssueCount = 1;
+                    RecordAudit(liveExec, WorkflowStepStatus.Completed, $"exit code {exitCode} (WARN_ON_NONZERO)");
                     _logger.LogWarning(
                         "Workflow {Id} tool '{StepId}' exited {Code} (WARN_ON_NONZERO)",
                         instanceId, stepDef.Id, exitCode);
                 }
                 else // FAIL_ON_NONZERO
                 {
-                    liveExec.Status = WorkflowStepStatus.Failed;
-                    liveExec.Error  = $"Command exited with code {exitCode}.";
+                    liveExec.Error = $"Command exited with code {exitCode}.";
+                    RecordAudit(liveExec, WorkflowStepStatus.Failed, liveExec.Error);
                     SkipDownstream(stepDef.Id, liveInst, liveDef);
                     _logger.LogWarning(
                         "Workflow {Id} tool '{StepId}' failed (exit code {Code})",
@@ -867,7 +1294,7 @@ public class WorkflowEngine
     }
 
     private static async Task<(string Output, int ExitCode)> RunProcessAsync(
-        string command, string workingDir)
+        string command, string workingDir, CancellationToken ct = default)
     {
         // Split "dotnet build --nologo" into executable + arguments
         var parts = command.Trim().Split(' ', 2);
@@ -888,9 +1315,18 @@ public class WorkflowEngine
         using var proc = new Process { StartInfo = psi };
         proc.Start();
 
-        var stdoutTask = proc.StandardOutput.ReadToEndAsync();
-        var stderrTask = proc.StandardError.ReadToEndAsync();
-        await proc.WaitForExitAsync();
+        var stdoutTask = proc.StandardOutput.ReadToEndAsync(ct);
+        var stderrTask = proc.StandardError.ReadToEndAsync(ct);
+
+        try
+        {
+            await proc.WaitForExitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+            throw;
+        }
 
         var stdout = await stdoutTask;
         var stderr = await stderrTask;
@@ -917,7 +1353,7 @@ public class WorkflowEngine
                 if (inst.StepExecutions.TryGetValue(step.Id, out var e)
                     && e.Status == WorkflowStepStatus.Pending)
                 {
-                    e.Status = WorkflowStepStatus.Skipped;
+                    RecordAudit(e, WorkflowStepStatus.Skipped, $"Upstream step '{failedStepId}' failed/skipped");
                     queue.Enqueue(step.Id);
                 }
             }
@@ -930,7 +1366,9 @@ public class WorkflowEngine
               .All(s => inst.StepExecutions.TryGetValue(s.Id, out var e)
                         && e.Status is WorkflowStepStatus.Completed
                                     or WorkflowStepStatus.Failed
-                                    or WorkflowStepStatus.Skipped);
+                                    or WorkflowStepStatus.Skipped
+                                    or WorkflowStepStatus.Rejected);
+              // WaitingForApproval is NOT terminal — the workflow is blocked until the user responds
 
     private WorkflowDefinition? FindDefinition(string id, string? workspacePath)
     {
@@ -943,16 +1381,12 @@ public class WorkflowEngine
         if (_workflowRepository is null) return;
         try
         {
+            await _workflowRepository.SaveWorkflowInstanceAsync(inst);
+
+            // C3: Schedule deferred in-memory cleanup so the UI can still query
+            // the instance for ~30 s after it reaches a terminal state.
             if (inst.Status is WorkflowStatus.Completed or WorkflowStatus.Failed or WorkflowStatus.Cancelled)
-            {
-                // Keep completed instances for a brief window, then let cleanup remove them
-                await _workflowRepository.SaveWorkflowInstanceAsync(inst);
-                // Note: we intentionally don't delete immediately — the UI may still query them.
-            }
-            else
-            {
-                await _workflowRepository.SaveWorkflowInstanceAsync(inst);
-            }
+                ScheduleInstanceCleanup(inst.InstanceId);
         }
         catch (Exception ex)
         {
@@ -960,5 +1394,191 @@ public class WorkflowEngine
         }
     }
 
+    /// <summary>
+    /// C3: Removes a terminal workflow instance from the in-memory active set after a
+    /// short grace period (so the UI can still query it post-completion).
+    /// The SemaphoreSlim in _locks is NOT disposed here — another thread may have already
+    /// retrieved a reference to it via GetOrAdd and be about to call WaitAsync.
+    /// SemaphoreSlim has no unmanaged resources when AvailableWaitHandle is never accessed
+    /// (we only use WaitAsync), so GC handles reclamation once references drop to zero.
+    /// </summary>
+    private void ScheduleInstanceCleanup(string instanceId)
+    {
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30));
+            // Remove _active first: any thread that gets the semaphore after this point
+            // will enter EvaluateDagAsync, find no active entry, and return immediately.
+            _active.TryRemove(instanceId, out _);
+            // Remove the semaphore entry to bound _locks size, but do NOT dispose it.
+            _locks.TryRemove(instanceId, out _);
+            _logger.LogDebug("Cleaned up completed instance {Id} from active set", instanceId);
+        });
+    }
+
     private void BroadcastUpdate(WorkflowInstance inst) => OnWorkflowUpdate?.Invoke(inst);
+
+    // ── Audit helper (BaseNode contract) ─────────────────────────────────
+
+    /// <summary>
+    /// Records a state transition in the step's AuditLog and updates Status atomically.
+    /// Call this instead of setting exec.Status directly.
+    /// </summary>
+    private static void RecordAudit(
+        WorkflowStepExecution exec, WorkflowStepStatus newStatus, string? reason = null)
+    {
+        exec.AuditLog.Add(new AuditEntry
+        {
+            FromStatus = exec.Status,
+            ToStatus   = newStatus,
+            Reason     = reason,
+        });
+        exec.Status = newStatus;
+    }
+
+    // ── Convergence loop helpers ───────────────────────────────────────────────
+
+    /// <summary>
+    /// Shared escalation handler for convergence loop failures .
+    /// Handles HUMAN_APPROVAL, DLQ, and CANCEL escalation targets.
+    /// </summary>
+    private async Task EscalateLoopAsync(
+        WorkflowInstance inst, WorkflowDefinition def,
+        WorkflowStepDef loopTargetDef, WorkflowStepExecution loopTargetExec,
+        AgentType agentType, string reason, string escalationTarget)
+    {
+        switch (escalationTarget)
+        {
+            case "HUMAN_APPROVAL":
+                inst.IsPaused = true;
+                inst.Status   = WorkflowStatus.Paused;
+                loopTargetExec.Output = reason + " Human approval required to continue or abort.";
+                RecordAudit(loopTargetExec, WorkflowStepStatus.WaitingForApproval, reason);
+                _logger.LogInformation(
+                    "Workflow {Id} paused for human approval — reason: {Reason}",
+                    inst.InstanceId, reason);
+                OnApprovalNeeded?.Invoke(
+                    inst.InstanceId, loopTargetDef.Id,
+                    reason + " Please decide whether to continue or cancel the workflow.");
+                break;
+
+            case "DLQ":
+                loopTargetExec.Error = reason + " Escalated to DLQ.";
+                RecordAudit(loopTargetExec, WorkflowStepStatus.Failed, loopTargetExec.Error);
+                inst.Status      = WorkflowStatus.Failed;
+                inst.CompletedAt = DateTime.UtcNow;
+                SkipDownstream(loopTargetDef.Id, inst, def);
+                break;
+
+            default: // CANCEL
+                loopTargetExec.Error = reason +
+                    $" Increase AgentLimits:{agentType}:MaxIterations " +
+                    "or the step's max_iterations to allow more iterations.";
+                RecordAudit(loopTargetExec, WorkflowStepStatus.Failed, loopTargetExec.Error);
+                inst.Status      = WorkflowStatus.Failed;
+                inst.CompletedAt = DateTime.UtcNow;
+                SkipDownstream(loopTargetDef.Id, inst, def);
+                break;
+        }
+
+        await PersistInstanceAsync(inst);
+        BroadcastUpdate(inst);
+    }
+
+    /// <summary>
+    ///  partial_retry_scope = FULL_WORKFLOW: reset every non-terminal step to Pending
+    /// so the entire workflow re-runs from the root. The loop target itself is excluded
+    /// because it was already reset by the caller.
+    /// </summary>
+    private static void ResetAllStepsForNewIteration(
+        string loopTargetId, WorkflowInstance inst, WorkflowDefinition def)
+    {
+        foreach (var s in def.Steps.Where(s => s.Id != loopTargetId))
+        {
+            var se = inst.StepExecutions[s.Id];
+            if (se.Status is WorkflowStepStatus.WaitingForApproval or WorkflowStepStatus.Rejected)
+                continue; // leave active approval gates undisturbed
+            se.Status     = WorkflowStepStatus.Pending;
+            se.Output     = null;
+            se.TaskId     = null;
+            se.Error      = null;
+            se.ExitCode   = null;
+            se.IssueCount = 0;
+        }
+    }
+
+    /// <summary>
+    ///  partial_retry_scope = FROM_CODEGEN: reset all steps that are downstream
+    /// (transitively dependent) of the loop target — the "loop body" — so the full
+    /// loop body re-runs, not just the immediate target.
+    /// The loop target itself is excluded because the caller already reset it.
+    /// </summary>
+    private static void ResetLoopBodyForNewIteration(
+        string loopTargetId, WorkflowInstance inst, WorkflowDefinition def)
+    {
+        foreach (var stepId in GetDescendantStepIds(loopTargetId, def))
+        {
+            var se = inst.StepExecutions[stepId];
+            if (se.Status is WorkflowStepStatus.WaitingForApproval or WorkflowStepStatus.Rejected)
+                continue;
+            se.Status     = WorkflowStepStatus.Pending;
+            se.Output     = null;
+            se.TaskId     = null;
+            se.Error      = null;
+            se.ExitCode   = null;
+            se.IssueCount = 0;
+        }
+    }
+
+    /// <summary>
+    /// BFS forward from rootId following DependsOn edges, returning all reachable step IDs
+    /// (excluding rootId itself). Used to identify the loop body for FROM_CODEGEN scope.
+    /// </summary>
+    private static HashSet<string> GetDescendantStepIds(string rootId, WorkflowDefinition def)
+    {
+        var result = new HashSet<string>();
+        var queue  = new Queue<string>();
+        queue.Enqueue(rootId);
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            foreach (var s in def.Steps.Where(s => s.DependsOn.Contains(current)))
+            {
+                if (result.Add(s.Id))
+                    queue.Enqueue(s.Id);
+            }
+        }
+        return result;
+    }
+
+    /// <summary>
+    ///  ConvergenceHintMemory: builds a structured context variable from the prior
+    /// iteration's failure data and injects it into the workflow's InputContext as
+    /// "convergence_hints". The refactor step's prompt template can reference {{convergence_hints}}.
+    /// </summary>
+    private static void InjectConvergenceHints(
+        WorkflowStepDef validationStep,
+        WorkflowStepExecution validationExec,
+        WorkflowStepExecution refactorExec,
+        WorkflowInstance inst)
+    {
+        // Collect failure signals from the validation/constraint step that triggered the loop
+        var failureLines = new System.Text.StringBuilder();
+        failureLines.AppendLine($"[Iteration {refactorExec.Iteration} causal memory]");
+        failureLines.AppendLine($"Step '{validationStep.Id}' reported {validationExec.IssueCount} issue(s).");
+
+        if (!string.IsNullOrWhiteSpace(validationExec.Output))
+        {
+            // Trim to ~800 chars to avoid bloating the prompt
+            var trimmed = validationExec.Output.Length > 800
+                ? validationExec.Output[..800] + "…"
+                : validationExec.Output;
+            failureLines.AppendLine($"Constraint output: {trimmed}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(validationExec.Error))
+            failureLines.AppendLine($"Error: {validationExec.Error}");
+
+        inst.InputContext["convergence_hints"] = failureLines.ToString().Trim();
+    }
 }

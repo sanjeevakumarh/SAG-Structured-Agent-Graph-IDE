@@ -16,7 +16,8 @@ namespace SAGIDE.Service.Providers;
 public class OllamaProvider : IAgentProvider
 {
     private readonly string _defaultBaseUrl;
-    private readonly Dictionary<string, string> _modelEndpoints; // modelId -> baseUrl
+    private readonly Dictionary<string, string> _modelEndpoints; // modelId -> baseUrl (static routing)
+    private readonly OllamaHostHealthMonitor? _healthMonitor;   // dynamic routing (optional)
     private readonly ConcurrentDictionary<string, HttpClient> _clientsByUrl = new();
     private readonly RetryPolicy _retryPolicy;
     private readonly TimeSpan _timeout;
@@ -26,18 +27,24 @@ public class OllamaProvider : IAgentProvider
     public int LastInputTokens { get; private set; }
     public int LastOutputTokens { get; private set; }
 
+    private readonly int _maxTokens;
+
     public OllamaProvider(
         string defaultBaseUrl,
         Dictionary<string, string> modelEndpoints,
         RetryPolicy retryPolicy,
         TimeSpan timeout,
-        ILogger<OllamaProvider> logger)
+        ILogger<OllamaProvider> logger,
+        OllamaHostHealthMonitor? healthMonitor = null,
+        int maxTokens = 4096)
     {
         _defaultBaseUrl = defaultBaseUrl;
         _modelEndpoints = modelEndpoints;
-        _retryPolicy = retryPolicy;
-        _timeout = timeout;
-        _logger = logger;
+        _retryPolicy    = retryPolicy;
+        _timeout        = timeout;
+        _logger         = logger;
+        _healthMonitor  = healthMonitor;
+        _maxTokens      = maxTokens;
     }
 
     private HttpClient GetClient(string baseUrl) =>
@@ -47,11 +54,27 @@ public class OllamaProvider : IAgentProvider
             Timeout = System.Threading.Timeout.InfiniteTimeSpan
         });
 
+    /// <summary>
+    ///  Load-aware routing:
+    ///   1. Explicit model.Endpoint override (highest priority)
+    ///   2. Health-monitor best host (warm VRAM → failover → any reachable)
+    ///   3. Static model-to-server mapping  (falls back when monitor is absent/unreachable)
+    ///   4. Default server
+    /// </summary>
     private string ResolveEndpoint(ModelConfig model)
     {
-        // Priority: explicit endpoint on ModelConfig > model-to-server mapping > default
         if (!string.IsNullOrEmpty(model.Endpoint))
             return model.Endpoint;
+
+        if (_healthMonitor is not null)
+        {
+            // Preferred URL from static config, all known URLs as failover candidates
+            var staticPreferred = _modelEndpoints.TryGetValue(model.ModelId, out var m) ? m : _defaultBaseUrl;
+            var allCandidates   = _modelEndpoints.Values.Prepend(_defaultBaseUrl).Distinct();
+            var best = _healthMonitor.TryGetBestHost(model.ModelId, staticPreferred, allCandidates);
+            if (best is not null) return best;
+        }
+
         if (_modelEndpoints.TryGetValue(model.ModelId, out var mapped))
             return mapped;
         return _defaultBaseUrl;
@@ -68,7 +91,8 @@ public class OllamaProvider : IAgentProvider
             model = model.ModelId,
             prompt,
             stream = false,
-            options = new { temperature = 0.7, num_predict = 4096 }
+            // Determinism: temperature=0 + seed=42 for reproducible outputs
+            options = new { temperature = 0, seed = 42, num_predict = _maxTokens }
         };
         var json = JsonSerializer.Serialize(requestBody);
 
@@ -111,7 +135,8 @@ public class OllamaProvider : IAgentProvider
             model = model.ModelId,
             prompt,
             stream = true,
-            options = new { temperature = 0.7, num_predict = 4096 }
+            // Determinism: temperature=0 + seed=42 for reproducible outputs
+            options = new { temperature = 0, seed = 42, num_predict = _maxTokens }
         };
         var json = JsonSerializer.Serialize(requestBody);
         var request = new HttpRequestMessage(HttpMethod.Post, "api/generate");

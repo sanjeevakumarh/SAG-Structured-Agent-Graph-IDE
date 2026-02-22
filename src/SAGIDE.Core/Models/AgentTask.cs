@@ -18,4 +18,10 @@ public class AgentTask
     public Dictionary<string, string> Metadata { get; set; } = [];
     public DateTime? ScheduledFor { get; set; }
     public string? ComparisonGroupId { get; set; }
+
+    /// <summary>
+    /// Replay: when true, bypasses the SHA-256 output cache and forces a fresh model call.
+    /// Runtime-only; not persisted to SQLite.
+    /// </summary>
+    public bool ForceRerun { get; set; }
 }

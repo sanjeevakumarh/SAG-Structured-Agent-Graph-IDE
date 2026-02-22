@@ -9,6 +9,18 @@ public class TaskQueue
     private readonly PriorityQueue<AgentTask, int> _pendingQueue = new();
     private readonly object _queueLock = new();
 
+    // ── Bounded in-memory history ─────────────────────────────────────────
+    // Terminal tasks are candidates for eviction; active tasks are never evicted.
+    // _terminalOrder tracks insertion order for FIFO eviction.
+    // Complete task history is always available in SQLite.
+    private readonly Queue<string> _terminalOrder = new();
+    private readonly int _maxHistorySize;
+
+    public TaskQueue(int maxHistorySize = 1000)
+    {
+        _maxHistorySize = maxHistorySize;
+    }
+
     public string Enqueue(AgentTask task)
     {
         _allTasks[task.Id] = task;
@@ -18,6 +30,25 @@ public class TaskQueue
             _pendingQueue.Enqueue(task, -task.Priority);
         }
         return task.Id;
+    }
+
+    /// <summary>
+    /// Called when a task reaches a terminal status (Completed, Failed, Cancelled).
+    /// Registers the task for FIFO eviction once the in-memory history exceeds the cap.
+    /// Full task history remains available in SQLite.
+    /// </summary>
+    public void MarkTerminal(string taskId)
+    {
+        lock (_queueLock)
+        {
+            _terminalOrder.Enqueue(taskId);
+            while (_allTasks.Count > _maxHistorySize && _terminalOrder.TryDequeue(out var evictId))
+            {
+                if (_allTasks.TryGetValue(evictId, out var t) &&
+                    t.Status is AgentTaskStatus.Completed or AgentTaskStatus.Failed or AgentTaskStatus.Cancelled)
+                    _allTasks.TryRemove(evictId, out _);
+            }
+        }
     }
 
     public AgentTask? Dequeue()

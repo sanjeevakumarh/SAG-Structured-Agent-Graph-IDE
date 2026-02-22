@@ -25,119 +25,23 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         // WAL allows concurrent reads while a write is in progress.
         // busy_timeout=5000 makes writers wait up to 5 s instead of failing immediately.
         var pragmaCmd = conn.CreateCommand();
-        pragmaCmd.CommandText = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;";
+        pragmaCmd.CommandText = SqlQueries.Pragmas;
         await pragmaCmd.ExecuteNonQueryAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            CREATE TABLE IF NOT EXISTS task_history (
-                id TEXT PRIMARY KEY,
-                agent_type TEXT NOT NULL,
-                model_provider TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                description TEXT NOT NULL DEFAULT '',
-                file_paths TEXT NOT NULL DEFAULT '[]',
-                status TEXT NOT NULL,
-                progress INTEGER NOT NULL DEFAULT 0,
-                status_message TEXT,
-                priority INTEGER NOT NULL DEFAULT 0,
-                metadata TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                started_at TEXT,
-                completed_at TEXT
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_task_created_at ON task_history(created_at);
-            CREATE INDEX IF NOT EXISTS idx_task_status ON task_history(status);
-
-            CREATE TABLE IF NOT EXISTS task_results (
-                task_id TEXT PRIMARY KEY,
-                success INTEGER NOT NULL DEFAULT 0,
-                output TEXT NOT NULL DEFAULT '',
-                issues TEXT NOT NULL DEFAULT '[]',
-                changes TEXT NOT NULL DEFAULT '[]',
-                tokens_used INTEGER NOT NULL DEFAULT 0,
-                estimated_cost REAL NOT NULL DEFAULT 0,
-                latency_ms INTEGER NOT NULL DEFAULT 0,
-                error_message TEXT,
-                FOREIGN KEY (task_id) REFERENCES task_history(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS dead_letter_tasks (
-                id TEXT PRIMARY KEY,
-                original_task_id TEXT NOT NULL,
-                agent_type TEXT NOT NULL,
-                model_provider TEXT NOT NULL,
-                model_id TEXT NOT NULL,
-                description TEXT,
-                file_paths TEXT NOT NULL DEFAULT '[]',
-                error_message TEXT NOT NULL,
-                error_code TEXT,
-                retry_count INTEGER NOT NULL DEFAULT 0,
-                failed_at TEXT NOT NULL,
-                original_created_at TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{}'
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_dlq_failed_at ON dead_letter_tasks(failed_at);
-
-            CREATE TABLE IF NOT EXISTS activity_log (
-                id TEXT PRIMARY KEY,
-                workspace_path TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                hour_bucket TEXT NOT NULL,
-                activity_type TEXT NOT NULL,
-                actor TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                details TEXT,
-                task_id TEXT,
-                file_paths TEXT NOT NULL DEFAULT '[]',
-                git_commit_hash TEXT,
-                metadata TEXT NOT NULL DEFAULT '{}',
-                FOREIGN KEY (task_id) REFERENCES task_history(id)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_activity_workspace ON activity_log(workspace_path);
-            CREATE INDEX IF NOT EXISTS idx_activity_hour_bucket ON activity_log(hour_bucket);
-            CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_log(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_activity_type ON activity_log(activity_type);
-            CREATE INDEX IF NOT EXISTS idx_activity_task ON activity_log(task_id);
-
-            CREATE TABLE IF NOT EXISTS activity_log_config (
-                workspace_path TEXT PRIMARY KEY,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                git_integration_mode TEXT NOT NULL DEFAULT 'log_commits',
-                markdown_enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            """;
-
+        cmd.CommandText = SqlQueries.CreateCoreTables;
         await cmd.ExecuteNonQueryAsync();
 
-        // Workflow instance persistence table
         var wfCmd = conn.CreateCommand();
-        wfCmd.CommandText = """
-            CREATE TABLE IF NOT EXISTS workflow_instances (
-                id           TEXT PRIMARY KEY,
-                definition_id TEXT NOT NULL,
-                status       TEXT NOT NULL,
-                instance_json TEXT NOT NULL,
-                workspace_path TEXT,
-                created_at   TEXT NOT NULL,
-                completed_at TEXT,
-                updated_at   TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_wf_status ON workflow_instances(status);
-            """;
+        wfCmd.CommandText = SqlQueries.CreateWorkflowTable;
         await wfCmd.ExecuteNonQueryAsync();
 
+        var cacheTableCmd = conn.CreateCommand();
+        cacheTableCmd.CommandText = SqlQueries.CreateOutputCacheTable;
+        await cacheTableCmd.ExecuteNonQueryAsync();
+
         // Schema migrations — ADD COLUMN is idempotent (SQLite throws on duplicate, we catch it)
-        foreach (var migrationSql in new[]
-        {
-            "ALTER TABLE task_history ADD COLUMN scheduled_for TEXT",
-            "ALTER TABLE task_history ADD COLUMN comparison_group_id TEXT",
-        })
+        foreach (var migrationSql in SqlQueries.Migrations)
         {
             try
             {
@@ -160,23 +64,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO task_history (id, agent_type, model_provider, model_id, description, file_paths,
-                status, progress, status_message, priority, metadata, created_at, started_at, completed_at,
-                scheduled_for, comparison_group_id)
-            VALUES (@id, @agentType, @modelProvider, @modelId, @description, @filePaths,
-                @status, @progress, @statusMessage, @priority, @metadata, @createdAt, @startedAt, @completedAt,
-                @scheduledFor, @comparisonGroupId)
-            ON CONFLICT(id) DO UPDATE SET
-                status = @status,
-                progress = @progress,
-                status_message = @statusMessage,
-                started_at = @startedAt,
-                completed_at = @completedAt,
-                metadata = @metadata,
-                scheduled_for = @scheduledFor,
-                comparison_group_id = @comparisonGroupId
-            """;
+        cmd.CommandText = SqlQueries.UpsertTask;
 
         cmd.Parameters.AddWithValue("@id", task.Id);
         cmd.Parameters.AddWithValue("@agentType", task.AgentType.ToString());
@@ -204,16 +92,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO task_results (task_id, success, output, issues, changes, tokens_used,
-                estimated_cost, latency_ms, error_message)
-            VALUES (@taskId, @success, @output, @issues, @changes, @tokensUsed,
-                @estimatedCost, @latencyMs, @errorMessage)
-            ON CONFLICT(task_id) DO UPDATE SET
-                success = @success, output = @output, issues = @issues, changes = @changes,
-                tokens_used = @tokensUsed, estimated_cost = @estimatedCost, latency_ms = @latencyMs,
-                error_message = @errorMessage
-            """;
+        cmd.CommandText = SqlQueries.UpsertResult;
 
         cmd.Parameters.AddWithValue("@taskId", result.TaskId);
         cmd.Parameters.AddWithValue("@success", result.Success ? 1 : 0);
@@ -234,7 +113,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT * FROM task_history WHERE id = @id";
+        cmd.CommandText = SqlQueries.SelectTaskById;
         cmd.Parameters.AddWithValue("@id", taskId);
 
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -247,7 +126,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT * FROM task_results WHERE task_id = @taskId";
+        cmd.CommandText = SqlQueries.SelectResultByTaskId;
         cmd.Parameters.AddWithValue("@taskId", taskId);
 
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -273,7 +152,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT * FROM task_history ORDER BY created_at DESC LIMIT @limit OFFSET @offset";
+        cmd.CommandText = SqlQueries.SelectTaskHistoryPaged;
         cmd.Parameters.AddWithValue("@limit", limit);
         cmd.Parameters.AddWithValue("@offset", offset);
 
@@ -292,7 +171,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT * FROM task_history WHERE status = @status ORDER BY created_at DESC";
+        cmd.CommandText = SqlQueries.SelectTasksByStatus;
         cmd.Parameters.AddWithValue("@status", status.ToString());
 
         var tasks = new List<AgentTask>();
@@ -309,13 +188,9 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync();
 
-        var cmd = conn.CreateCommand();
         // Reload tasks that were Queued or Running (Running = crashed mid-execution, reset to Queued)
-        cmd.CommandText = """
-            SELECT * FROM task_history
-            WHERE status IN ('Queued', 'Running')
-            ORDER BY priority DESC, created_at ASC
-            """;
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = SqlQueries.SelectPendingTasks;
 
         var tasks = new List<AgentTask>();
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -340,15 +215,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO dead_letter_tasks (id, original_task_id, agent_type, model_provider, model_id,
-                description, file_paths, error_message, error_code, retry_count, failed_at,
-                original_created_at, metadata)
-            VALUES (@id, @originalTaskId, @agentType, @modelProvider, @modelId,
-                @description, @filePaths, @errorMessage, @errorCode, @retryCount, @failedAt,
-                @originalCreatedAt, @metadata)
-            ON CONFLICT(id) DO NOTHING
-            """;
+        cmd.CommandText = SqlQueries.InsertDlqEntry;
 
         cmd.Parameters.AddWithValue("@id", entry.Id);
         cmd.Parameters.AddWithValue("@originalTaskId", entry.OriginalTaskId);
@@ -373,7 +240,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT * FROM dead_letter_tasks ORDER BY failed_at DESC";
+        cmd.CommandText = SqlQueries.SelectAllDlq;
 
         var entries = new List<DeadLetterEntry>();
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -390,7 +257,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM dead_letter_tasks WHERE id = @id";
+        cmd.CommandText = SqlQueries.DeleteDlqById;
         cmd.Parameters.AddWithValue("@id", dlqId);
         await cmd.ExecuteNonQueryAsync();
     }
@@ -401,7 +268,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM dead_letter_tasks WHERE failed_at < @cutoff";
+        cmd.CommandText = SqlQueries.PurgeDlqOlderThan;
         cmd.Parameters.AddWithValue("@cutoff", cutoff.ToString("O"));
         var deleted = await cmd.ExecuteNonQueryAsync();
 
@@ -460,13 +327,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO activity_log (id, workspace_path, timestamp, hour_bucket, activity_type,
-                actor, summary, details, task_id, file_paths, git_commit_hash, metadata)
-            VALUES (@id, @workspacePath, @timestamp, @hourBucket, @activityType,
-                @actor, @summary, @details, @taskId, @filePaths, @gitCommitHash, @metadata)
-            ON CONFLICT(id) DO NOTHING
-            """;
+        cmd.CommandText = SqlQueries.InsertActivity;
 
         cmd.Parameters.AddWithValue("@id", entry.Id);
         cmd.Parameters.AddWithValue("@workspacePath", entry.WorkspacePath);
@@ -490,11 +351,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT * FROM activity_log
-            WHERE workspace_path = @workspacePath AND hour_bucket = @hourBucket
-            ORDER BY timestamp ASC
-            """;
+        cmd.CommandText = SqlQueries.SelectActivitiesByHour;
         cmd.Parameters.AddWithValue("@workspacePath", workspacePath);
         cmd.Parameters.AddWithValue("@hourBucket", hourBucket);
 
@@ -513,12 +370,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT * FROM activity_log
-            WHERE workspace_path = @workspacePath
-                AND timestamp >= @start AND timestamp <= @end
-            ORDER BY timestamp ASC
-            """;
+        cmd.CommandText = SqlQueries.SelectActivitiesByTimeRange;
         cmd.Parameters.AddWithValue("@workspacePath", workspacePath);
         cmd.Parameters.AddWithValue("@start", start.ToString("O"));
         cmd.Parameters.AddWithValue("@end", end.ToString("O"));
@@ -538,12 +390,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            SELECT DISTINCT hour_bucket FROM activity_log
-            WHERE workspace_path = @workspacePath
-            ORDER BY hour_bucket DESC
-            LIMIT @limit
-            """;
+        cmd.CommandText = SqlQueries.SelectHourBuckets;
         cmd.Parameters.AddWithValue("@workspacePath", workspacePath);
         cmd.Parameters.AddWithValue("@limit", limit);
 
@@ -562,7 +409,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT * FROM activity_log_config WHERE workspace_path = @workspacePath";
+        cmd.CommandText = SqlQueries.SelectActivityConfig;
         cmd.Parameters.AddWithValue("@workspacePath", workspacePath);
 
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -585,16 +432,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO activity_log_config (workspace_path, enabled, git_integration_mode,
-                markdown_enabled, created_at, updated_at)
-            VALUES (@workspacePath, @enabled, @gitIntegrationMode, @markdownEnabled, @createdAt, @updatedAt)
-            ON CONFLICT(workspace_path) DO UPDATE SET
-                enabled = @enabled,
-                git_integration_mode = @gitIntegrationMode,
-                markdown_enabled = @markdownEnabled,
-                updated_at = @updatedAt
-            """;
+        cmd.CommandText = SqlQueries.UpsertActivityConfig;
 
         cmd.Parameters.AddWithValue("@workspacePath", config.WorkspacePath);
         cmd.Parameters.AddWithValue("@enabled", config.Enabled ? 1 : 0);
@@ -620,18 +458,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = """
-            INSERT INTO workflow_instances (id, definition_id, status, instance_json,
-                workspace_path, created_at, completed_at, updated_at)
-            VALUES (@id, @definitionId, @status, @json, @workspacePath,
-                @createdAt, @completedAt, @updatedAt)
-            ON CONFLICT(id) DO UPDATE SET
-                status       = @status,
-                instance_json= @json,
-                workspace_path = @workspacePath,
-                completed_at = @completedAt,
-                updated_at   = @updatedAt
-            """;
+        cmd.CommandText = SqlQueries.UpsertWorkflowInstance;
 
         cmd.Parameters.AddWithValue("@id",           instance.InstanceId);
         cmd.Parameters.AddWithValue("@definitionId", instance.DefinitionId);
@@ -650,13 +477,9 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await using var conn = new SqliteConnection(_connectionString);
         await conn.OpenAsync();
 
-        var cmd = conn.CreateCommand();
         // Recover both Running and Paused instances — they may have in-flight steps
-        cmd.CommandText = """
-            SELECT instance_json FROM workflow_instances
-            WHERE status IN ('Running', 'Paused')
-            ORDER BY created_at ASC
-            """;
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = SqlQueries.SelectRunningWorkflowInstances;
 
         var results = new List<WorkflowInstance>();
         await using var reader = await cmd.ExecuteReaderAsync();
@@ -676,8 +499,38 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         await conn.OpenAsync();
 
         var cmd = conn.CreateCommand();
-        cmd.CommandText = "DELETE FROM workflow_instances WHERE id = @id";
+        cmd.CommandText = SqlQueries.DeleteWorkflowInstance;
         cmd.Parameters.AddWithValue("@id", instanceId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    // ── §2.3 Determinism — output cache ──────────────────────────────────────
+
+    public async Task<string?> GetCachedOutputAsync(string cacheKey)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync();
+
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = SqlQueries.GetCachedOutput;
+        cmd.Parameters.AddWithValue("@cacheKey", cacheKey);
+
+        var result = await cmd.ExecuteScalarAsync();
+        return result is string s ? s : null;
+    }
+
+    public async Task StoreCachedOutputAsync(string cacheKey, string output, string modelId)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync();
+
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = SqlQueries.UpsertCachedOutput;
+        cmd.Parameters.AddWithValue("@cacheKey",  cacheKey);
+        cmd.Parameters.AddWithValue("@output",    output);
+        cmd.Parameters.AddWithValue("@modelId",   modelId);
+        cmd.Parameters.AddWithValue("@createdAt", DateTime.UtcNow.ToString("O"));
+
         await cmd.ExecuteNonQueryAsync();
     }
 

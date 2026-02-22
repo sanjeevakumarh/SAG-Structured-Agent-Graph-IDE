@@ -55,6 +55,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             diagnosticsManager.updateFromTask(status);
         }
 
+        // Stop the streaming panel when cancelled (C# throws OCE and never sends IsLastChunk=true)
+        if (status.status === 'Cancelled') {
+            StreamingOutputPanel.cancel(status.taskId);
+        }
+
         // Move completed/failed/cancelled tasks to history
         if (status.status === 'Completed' || status.status === 'Failed' || status.status === 'Cancelled') {
             historyTreeProvider.addCompleted(status);
@@ -153,6 +158,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         } else if (instance.status === 'failed') {
             vscode.window.showWarningMessage(`$(error) Workflow "${instance.definitionName}" failed`);
         }
+    });
+
+    // Handle human approval gate notifications
+    connection.onApprovalNeeded(payload => {
+        vscode.window.showInformationMessage(
+            `$(person) Workflow approval required for step "${payload.stepId}"`,
+            'Approve', 'Reject'
+        ).then(action => {
+            if (action === 'Approve') {
+                vscode.commands.executeCommand('sagIDE.approveWorkflowStep', payload.instanceId, payload.stepId, true, undefined);
+            } else if (action === 'Reject') {
+                vscode.commands.executeCommand('sagIDE.approveWorkflowStep', payload.instanceId, payload.stepId, false, undefined);
+            }
+        });
     });
 
     // Register all commands

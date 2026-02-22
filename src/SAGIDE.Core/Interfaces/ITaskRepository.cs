@@ -16,4 +16,8 @@ public interface ITaskRepository
     Task<IReadOnlyList<DeadLetterEntry>> GetDlqEntriesAsync();
     Task RemoveDlqEntryAsync(string dlqId);
     Task PurgeDlqOlderThanAsync(DateTime cutoff);
+
+    // Determinism & Replay — output cache
+    Task<string?> GetCachedOutputAsync(string cacheKey);
+    Task StoreCachedOutputAsync(string cacheKey, string output, string modelId);
 }

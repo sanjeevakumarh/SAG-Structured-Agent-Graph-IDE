@@ -1,0 +1,12 @@
+name: "Code Audit"
+description: "Run code review, debug analysis, and documentation in parallel."
+steps:
+  - id: review
+    agent: Reviewer
+    prompt: "Perform a thorough code review."
+  - id: debug
+    agent: Debugger
+    prompt: "Analyze for bugs, memory leaks, and race conditions."
+  - id: docs
+    agent: Documenter
+    prompt: "Generate or update documentation for this code."

@@ -1,18 +1,31 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { ServiceConnection } from '../client/ServiceConnection';
 import { TaskTreeProvider } from '../views/TaskTreeProvider';
 import { HistoryTreeProvider } from '../views/HistoryTreeProvider';
 import { DlqTreeProvider } from '../views/DlqTreeProvider';
 import { DiagnosticsManager } from '../views/DiagnosticsManager';
-import { WorkflowExplorerProvider } from '../views/WorkflowExplorerProvider';
+import { WorkflowExplorerProvider, WorkflowRunningItem } from '../views/WorkflowExplorerProvider';
 import { WorkflowGraphPanel } from '../views/WorkflowGraphPanel';
-import { submitTaskCommand, submitTaskOnFilesCommand } from './SubmitTaskCommand';
+import { submitTaskCommand, submitTaskOnFilesCommand, getAllModels } from './SubmitTaskCommand';
 import { compareModelsCommand } from './CompareModelsCommand';
 import { runWorkflowCommand } from './RunWorkflowCommand';
 import { ComparisonTracker } from '../utils/ComparisonTracker';
 import { openTaskResult } from '../utils/ResultViewer';
 import { log } from '../utils/Logger';
 import { WorkflowDefinition, WorkflowInstance } from '../client/MessageProtocol';
+import { pickContext } from '../utils/ContextPicker';
+
+/**
+ * Tree-view inline commands receive the clicked TreeItem as their first argument,
+ * while programmatic executeCommand calls pass the instanceId string directly.
+ * This helper normalises both cases.
+ */
+function resolveInstanceId(arg?: string | WorkflowRunningItem): string | undefined {
+    if (!arg) { return undefined; }
+    if (typeof arg === 'string') { return arg; }
+    return arg.instance?.instanceId;
+}
 
 export function registerCommands(
     context: vscode.ExtensionContext,
@@ -83,42 +96,58 @@ export function registerCommands(
         })
     );
 
-    // Review current file (quick action)
+    // Review current file (quick action — CodeReview pre-selected, context picker for scope)
     context.subscriptions.push(
         vscode.commands.registerCommand('sagIDE.reviewFile', async () => {
-            const editor = vscode.window.activeTextEditor;
-            if (!editor) {
-                vscode.window.showWarningMessage('No file is open');
-                return;
-            }
-
             if (!connection.isConnected) {
                 vscode.window.showErrorMessage('SAG IDE service is not running');
                 return;
             }
 
-            const config = vscode.workspace.getConfiguration('sagIDE');
-            const model = config.get<string>('models.codeReview', 'claude');
-            const modelIds: Record<string, string> = {
-                claude: 'claude-sonnet-4-20250514',
-                codex: 'gpt-4o',
-                gemini: 'gemini-2.0-flash',
-                ollama: 'codellama:13b',
-            };
+            const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+            const workspacePath = workspaceFolder?.uri.fsPath || '';
+
+            // Resolve model: use CodeReview affinity from service, fall back to first available
+            const allModels = await getAllModels(connection);
+            if (allModels.length === 0) {
+                vscode.window.showWarningMessage('No models available. Check service connection.');
+                return;
+            }
+            let model = allModels[0];
+            try {
+                const resp = await connection.getModels();
+                const affinityKey = resp?.affinities['CodeReview'];
+                const preferred = affinityKey ? allModels.find(m => m.key === affinityKey) : undefined;
+                if (preferred) { model = preferred; }
+            } catch { /* keep first model */ }
+
+            // Pick context (scope) — lets user choose active file, open editors, folder, etc.
+            const ctx = await pickContext(workspacePath || undefined);
+            if (!ctx) { return; }
+
+            const defaultDesc = ctx.filePaths.length === 1
+                ? `Review ${path.basename(ctx.filePaths[0])}`
+                : `Review ${ctx.label}`;
+            const description = await vscode.window.showInputBox({
+                prompt: 'Describe what to review',
+                value: defaultDesc,
+            });
+            if (!description) { return; }
 
             try {
                 const result = await connection.submitTask({
                     agentType: 'CodeReview',
-                    modelProvider: model as any,
-                    modelId: modelIds[model] || model,
-                    description: `Review ${editor.document.fileName}`,
-                    filePaths: [editor.document.uri.fsPath],
+                    modelProvider: model.provider,
+                    modelId: model.modelId,
+                    description,
+                    filePaths: ctx.filePaths,
                     priority: 1,
+                    metadata: workspacePath ? { workspacePath } : undefined,
+                    modelEndpoint: model.endpoint,
                 });
-
                 if (result) {
                     vscode.window.showInformationMessage(
-                        `Code review started on ${model} — Task ${result.taskId.substring(0, 8)}`
+                        `Code review started on ${model.modelId.split(':')[0]} — Task ${result.taskId.substring(0, 8)}`
                     );
                 }
             } catch (err) {
@@ -577,7 +606,8 @@ export function registerCommands(
 
     // Cancel a running workflow instance
     context.subscriptions.push(
-        vscode.commands.registerCommand('sagIDE.cancelWorkflowInstance', async (instanceId?: string) => {
+        vscode.commands.registerCommand('sagIDE.cancelWorkflowInstance', async (arg?: string | WorkflowRunningItem) => {
+            const instanceId = resolveInstanceId(arg);
             if (!instanceId) {
                 vscode.window.showWarningMessage('No workflow instance to cancel');
                 return;
@@ -611,7 +641,8 @@ export function registerCommands(
 
     // Pause a running workflow instance
     context.subscriptions.push(
-        vscode.commands.registerCommand('sagIDE.pauseWorkflowInstance', async (instanceId?: string) => {
+        vscode.commands.registerCommand('sagIDE.pauseWorkflowInstance', async (arg?: string | WorkflowRunningItem) => {
+            const instanceId = resolveInstanceId(arg);
             if (!instanceId) {
                 vscode.window.showWarningMessage('No workflow instance selected');
                 return;
@@ -627,7 +658,8 @@ export function registerCommands(
 
     // Resume a paused workflow instance
     context.subscriptions.push(
-        vscode.commands.registerCommand('sagIDE.resumeWorkflowInstance', async (instanceId?: string) => {
+        vscode.commands.registerCommand('sagIDE.resumeWorkflowInstance', async (arg?: string | WorkflowRunningItem) => {
+            const instanceId = resolveInstanceId(arg);
             if (!instanceId) {
                 vscode.window.showWarningMessage('No workflow instance selected');
                 return;
@@ -643,7 +675,8 @@ export function registerCommands(
 
     // Update a workflow context variable while running
     context.subscriptions.push(
-        vscode.commands.registerCommand('sagIDE.updateWorkflowContext', async (instanceId?: string) => {
+        vscode.commands.registerCommand('sagIDE.updateWorkflowContext', async (arg?: string | WorkflowRunningItem) => {
+            const instanceId = resolveInstanceId(arg);
             if (!instanceId) {
                 vscode.window.showWarningMessage('No workflow instance selected');
                 return;
@@ -665,5 +698,43 @@ export function registerCommands(
                 vscode.window.showErrorMessage(`Failed to update context: ${err}`);
             }
         })
+    );
+
+    // Clear completed/failed/cancelled workflow instances from the explorer
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.clearCompletedWorkflows', () => {
+            workflowExplorer.clearCompletedInstances();
+            vscode.window.showInformationMessage('Completed workflow instances cleared from view');
+        })
+    );
+
+    // Approve or reject a human_approval gate step
+    context.subscriptions.push(
+        vscode.commands.registerCommand('sagIDE.approveWorkflowStep',
+            async (instanceId?: string, stepId?: string, approved?: boolean, _comment?: string) => {
+                if (!instanceId || !stepId) {
+                    vscode.window.showWarningMessage('No approval step specified');
+                    return;
+                }
+
+                let comment: string | undefined;
+                if (!approved) {
+                    comment = await vscode.window.showInputBox({
+                        title: `Reject workflow step "${stepId}"`,
+                        prompt: 'Optional: provide a reason for rejection',
+                        placeHolder: 'Rejection reason (optional)',
+                    });
+                    if (comment === undefined) { return; } // user cancelled the input box
+                }
+
+                try {
+                    await connection.approveWorkflowStep(instanceId, stepId, approved ?? true, comment);
+                    vscode.window.showInformationMessage(
+                        approved ? `Step "${stepId}" approved.` : `Step "${stepId}" rejected.`
+                    );
+                } catch (err) {
+                    vscode.window.showErrorMessage(`Failed to ${approved ? 'approve' : 'reject'} step: ${err}`);
+                }
+            })
     );
 }

@@ -51,6 +51,11 @@ sequenceDiagram
 - Shipped: orchestration with DLQ/persistence (SQLite WAL), multi-provider streaming UI (real-time chunks with token counts), workflow engine (DAGs, routers, approval gates, pause/resume), Git-linked activity logging (markdown generation), comparison groups (all N models side-by-side), diagnostics (issues parsed to Problems panel).
 - In progress: harden streaming reliability at high token rates (>500 tok/sec), expand workflow templates (security audit, API generation, code migration), improve DLQ UI (batch retry, error categorization).
 
+## Updates (2026-02-21)
+- Local-first stack steady: .NET 9 service, SQLite WAL persistence, named pipes <10ms, affinity routing across Claude/Codex/Gemini/Ollama/TensorRT-LLM.
+- Workflow engine stable: DAGs/routers, pause/resume, approval gates with diffs, Git-linked activity logs survive editor restarts.
+- Comparison + reliability: grouped multi-model runs with token-counted streaming and <0.5ms broadcasts; DLQ with retry/discard and backoff; 50-entry history cap; Active Tasks/History/DLQ/Workflow Explorer/Streaming Output/Diff Approval/Problems panels remain consistent.
+
 ## Quickstart
 
 ### Prerequisites
@@ -67,7 +72,7 @@ cd SAGExtention
 
 ### 2) Start the orchestration service
 ```bash
-cd src/AgenticIDE.Service
+cd src/SAGIDE.Service
 dotnet run
 ```
 Leave this running; it hosts named pipes, task orchestration with concurrent execution and queue, SQLite WAL persistence (~50 task history limit), and provider routing to Claude, Codex, Gemini, or Ollama.
@@ -89,7 +94,7 @@ Leave this running; it hosts named pipes, task orchestration with concurrent exe
 
 ## Model configuration
 Configuration lives in two places:
-- Service: `src/AgenticIDE.Service/appsettings.json`
+- Service: `src/SAGIDE.Service/appsettings.json`
 - Extension: `sagIDE.*` VS Code settings
 
 ### Local (Ollama or TensorRT-LLM)
@@ -198,7 +203,7 @@ convergencePolicy:
 - Leave `AgenticIDE:ApiKeys` section empty in `appsettings.json` (no cloud keys configured = no cloud access).
 
 ### How do I fix "Service not running"?
-- Start the backend: `cd src/AgenticIDE.Service && dotnet run` (will log NamedPipeServer startup and DI registration).
+- Start the backend: `cd src/SAGIDE.Service && dotnet run` (will log NamedPipeServer startup and DI registration).
 - Verify `sagIDE.pipeName` in VS Code settings matches `AgenticIDE:NamedPipeName` in `appsettings.json` (default: `AgenticIDEPipe`).
 - Check firewall: Windows Defender may block named pipes on first run (allow when prompted).
 - If extension shows "Disconnected" but service is running, extension auto-reconnects every 3 seconds (exponential backoff).
@@ -210,7 +215,7 @@ convergencePolicy:
 
 ## Troubleshooting quick links
 - Ollama install: https://ollama.com
-- Service logs: `src/AgenticIDE.Service/logs/` (Serilog, daily rolling files, Info+ level)
+- Service logs: `src/SAGIDE.Service/logs/` (Serilog, daily rolling files, Info+ level)
 - Extension logs: Output panel → `SAG IDE` (connects, submits tasks, receives broadcasts)
 - Named pipe (Windows): Resource Monitor → Handles, search for `AgenticIDEPipe` to verify listening
 - Streaming stalls: Check agent output token rate; if <100 tok/sec, model may be overloaded or rate-limited

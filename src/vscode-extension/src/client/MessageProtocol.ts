@@ -41,6 +41,13 @@ export const MessageTypes = {
     PauseWorkflow: 'pause_workflow',
     ResumeWorkflow: 'resume_workflow',
     UpdateWorkflowContext: 'update_workflow_context',
+
+    // Human approval gate
+    WorkflowApprovalNeeded: 'workflow_approval_needed',
+    ApproveWorkflowStep: 'approve_workflow_step',
+
+    // Model discovery
+    GetModels: 'get_models',
 } as const;
 
 export type ModelProvider = 'claude' | 'codex' | 'gemini' | 'ollama';
@@ -225,7 +232,7 @@ export interface RouterBranch {
 
 export interface WorkflowStepDef {
     id: string;
-    type: 'agent' | 'router' | 'tool' | 'constraint';
+    type: 'agent' | 'router' | 'tool' | 'constraint' | 'human_approval';
     agent?: string;
     dependsOn: string[];
     prompt?: string;
@@ -241,6 +248,18 @@ export interface WorkflowStepDef {
     // constraint step fields
     constraintExpr?: string;
     onConstraintFail?: string;
+    // human_approval step fields
+    slaHours?: number;
+    timeoutAction?: string;
+    approvalPrompt?: string;
+}
+
+export interface ConvergencePolicy {
+    maxIterations: number;
+    escalationTarget: 'HUMAN_APPROVAL' | 'DLQ' | 'CANCEL';
+    partialRetryScope: 'FAILING_NODES_ONLY' | 'FROM_CODEGEN' | 'FULL_WORKFLOW';
+    convergenceHintMemory: boolean;
+    timeoutPerIterationSec: number;
 }
 
 export interface WorkflowDefinition {
@@ -250,9 +269,30 @@ export interface WorkflowDefinition {
     parameters: WorkflowParameter[];
     steps: WorkflowStepDef[];
     isBuiltIn: boolean;
+    convergencePolicy?: ConvergencePolicy;
 }
 
-export type WorkflowStepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+export interface ApproveWorkflowStepRequest {
+    instanceId: string;
+    stepId: string;
+    approved: boolean;
+    comment?: string;
+}
+
+export interface WorkflowApprovalNeededPayload {
+    instanceId: string;
+    stepId: string;
+    prompt: string;
+}
+
+export type WorkflowStepStatus =
+    | 'pending'
+    | 'running'
+    | 'completed'
+    | 'failed'
+    | 'skipped'
+    | 'waitingForApproval'
+    | 'rejected';
 export type WorkflowStatus = 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
 
 export interface WorkflowStepExecution {
@@ -282,6 +322,14 @@ export interface WorkflowInstance {
     workspacePath?: string;
 }
 
+/** Per-step model override chosen at workflow launch time (keyed by step ID). */
+export interface StepModelOverride {
+    provider: string;
+    modelId: string;
+    /** Ollama server URL; absent for cloud models. */
+    endpoint?: string;
+}
+
 export interface StartWorkflowRequest {
     definitionId: string;
     inputs: Record<string, string>;
@@ -290,6 +338,8 @@ export interface StartWorkflowRequest {
     defaultModelProvider: string;
     modelEndpoint?: string;
     workspacePath?: string;
+    /** Per-step model overrides: stepId → chosen model. */
+    stepModelOverrides?: Record<string, StepModelOverride>;
 }
 
 export interface PauseWorkflowRequest {
@@ -308,4 +358,23 @@ export interface UpdateWorkflowContextRequest {
 
 export interface CancelWorkflowRequest {
     instanceId: string;
+}
+
+// ── Model Discovery Types ─────────────────────────────────────────────────────
+
+/** A single selectable model option returned by the service's get_models handler. */
+export interface ModelOption {
+    key: string;
+    label: string;
+    provider: ModelProvider;
+    modelId: string;
+    description: string;
+    endpoint?: string;  // Ollama server URL; absent for cloud models
+}
+
+/** Response payload for the get_models message. */
+export interface GetModelsResponse {
+    models: ModelOption[];
+    /** Maps AgentType name → recommended model key from affinities config. */
+    affinities: Record<string, string>;
 }

@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import { ServiceConnection } from '../client/ServiceConnection';
 import { AgentType, SubmitTaskRequest } from '../client/MessageProtocol';
 import { ComparisonTracker } from '../utils/ComparisonTracker';
-import { AGENT_TYPES, ALL_MODELS } from './SubmitTaskCommand';
+import { AGENT_TYPES, getAllModels } from './SubmitTaskCommand';
 import { log, logError } from '../utils/Logger';
 
 export async function compareModelsCommand(
@@ -23,7 +23,7 @@ export async function compareModelsCommand(
     if (!agentPick) { return; }
 
     // 2. Multi-select models (2-4)
-    const modelItems = ALL_MODELS.map(m => ({
+    const modelItems = (await getAllModels(connection)).map(m => ({
         label: m.label,
         description: m.description,
         picked: false,

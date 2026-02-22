@@ -41,6 +41,12 @@ export class WorkflowGraphPanel {
                 vscode.commands.executeCommand('sagIDE.updateWorkflowContext', msg.instanceId);
             } else if (msg.command === 'openTask') {
                 vscode.commands.executeCommand('sagIDE.openTaskOutput', msg.taskId);
+            } else if (msg.command === 'approveStep') {
+                vscode.commands.executeCommand('sagIDE.approveWorkflowStep',
+                    msg.instanceId, msg.stepId, true, undefined);
+            } else if (msg.command === 'rejectStep') {
+                vscode.commands.executeCommand('sagIDE.approveWorkflowStep',
+                    msg.instanceId, msg.stepId, false, undefined);
             }
         }, undefined, context.subscriptions);
 
@@ -121,15 +127,24 @@ export class WorkflowGraphPanel {
   .step-card { width: 180px; border: 1px solid var(--vscode-panel-border); border-radius: 6px;
                padding: 10px 12px; cursor: pointer; transition: border-color 0.15s; }
   .step-card:hover { border-color: var(--vscode-focusBorder); }
-  .step-card.status-pending  { border-color: #555; opacity: 0.7; }
-  .step-card.status-running  { border-color: #5ba9e0; box-shadow: 0 0 8px rgba(91,169,224,0.3); }
-  .step-card.status-completed{ border-color: #5cb85c; }
-  .step-card.status-failed   { border-color: #e05b5b; }
-  .step-card.status-skipped  { border-color: #555; opacity: 0.5; }
-  .step-card.type-router     { transform: none; clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
-                               width: 80px; height: 80px; display: flex; align-items: center; justify-content: center; padding: 4px; }
-  .step-card.type-tool       { border-style: dashed; }
-  .step-card.type-constraint { border-style: dotted; background: rgba(120,80,180,0.08); }
+  .step-card.status-pending            { border-color: #555; opacity: 0.7; }
+  .step-card.status-running            { border-color: #5ba9e0; box-shadow: 0 0 8px rgba(91,169,224,0.3); }
+  .step-card.status-completed          { border-color: #5cb85c; }
+  .step-card.status-failed             { border-color: #e05b5b; }
+  .step-card.status-skipped            { border-color: #555; opacity: 0.5; }
+  .step-card.status-rejected           { border-color: #c05000; opacity: 0.7; }
+  .step-card.status-waitingForApproval { border-color: #d4a017; box-shadow: 0 0 10px rgba(212,160,23,0.4); animation: pulse-border 2s ease-in-out infinite; }
+  @keyframes pulse-border { 0%,100% { box-shadow: 0 0 6px rgba(212,160,23,0.3); } 50% { box-shadow: 0 0 14px rgba(212,160,23,0.7); } }
+  .step-card.type-router          { transform: none; clip-path: polygon(50% 0%, 100% 50%, 50% 100%, 0% 50%);
+                                    width: 80px; height: 80px; display: flex; align-items: center; justify-content: center; padding: 4px; }
+  .step-card.type-tool            { border-style: dashed; }
+  .step-card.type-constraint      { border-style: dotted; background: rgba(120,80,180,0.08); }
+  .step-card.type-human_approval  { border-style: double; background: rgba(212,160,23,0.06); }
+  .approval-btns { display: flex; gap: 6px; margin-top: 8px; }
+  .btn-approve { background: #1a4a1e; color: #5cb85c; border: 1px solid #5cb85c; padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+  .btn-approve:hover { background: #2a6a2e; }
+  .btn-reject  { background: #4a1a1a; color: #e05b5b; border: 1px solid #e05b5b; padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 11px; }
+  .btn-reject:hover  { background: #6a2a2a; }
   .step-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
   .step-icon { font-size: 14px; }
   .step-label { font-size: 12px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -208,11 +223,11 @@ export class WorkflowGraphPanel {
   }
 
   function buildCard(stepDef, exec, status) {
-    const typeClass = ['router','tool','constraint'].includes(stepDef.type)
+    const typeClass = ['router','tool','constraint','human_approval'].includes(stepDef.type)
       ? ' type-' + stepDef.type : '';
     const div = document.createElement('div');
     div.className = 'step-card status-' + status + typeClass;
-    if (exec && exec.taskId) {
+    if (exec && exec.taskId && status !== 'waitingForApproval') {
       div.onclick = () => vscode.postMessage({ command: 'openTask', taskId: exec.taskId });
     }
 
@@ -222,10 +237,18 @@ export class WorkflowGraphPanel {
     const exitBadge = exec && exec.exitCode != null
       ? '<span style="font-size:10px;color:' + (exec.exitCode === 0 ? '#5cb85c' : '#e05b5b') + '">exit ' + exec.exitCode + '</span>'
       : '';
-    const meta = stepDef.type === 'tool'       ? (stepDef.command  || '').split(' ').slice(0,2).join(' ')
-               : stepDef.type === 'constraint' ? (stepDef.constraintExpr || '')
-               : stepDef.type === 'router'     ? '◇ router'
+    const meta = stepDef.type === 'tool'           ? (stepDef.command  || '').split(' ').slice(0,2).join(' ')
+               : stepDef.type === 'constraint'     ? (stepDef.constraintExpr || '')
+               : stepDef.type === 'router'         ? '◇ router'
+               : stepDef.type === 'human_approval' ? '👤 approval gate'
                : stepDef.agent || (stepDef.modelId || stepDef.modelProvider || '');
+
+    const approvalBtns = (status === 'waitingForApproval')
+      ? \`<div class="approval-btns">
+           <button class="btn-approve" onclick="event.stopPropagation(); approveStep('\${stepDef.id}')">✓ Approve</button>
+           <button class="btn-reject"  onclick="event.stopPropagation(); rejectStep('\${stepDef.id}')">✗ Reject</button>
+         </div>\`
+      : '';
 
     div.innerHTML = \`
       <div class="step-header">
@@ -236,17 +259,27 @@ export class WorkflowGraphPanel {
       <div class="step-meta" title="\${meta}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\${meta}</div>
       \${exitBadge}
       \${issues ? '<div class="step-issues">⚠ ' + issues + '</div>' : ''}
+      \${approvalBtns}
     \`;
     return div;
   }
 
   function stepTypeIcon(type, status) {
-    if (status === 'running')   return '<span class="spin">⟳</span>';
-    if (status === 'completed') return type === 'tool' ? '⚙' : type === 'constraint' ? '✔' : '✓';
-    if (status === 'failed')    return '✗';
-    if (status === 'skipped')   return '—';
+    if (status === 'running')            return '<span class="spin">⟳</span>';
+    if (status === 'waitingForApproval') return '🕐';
+    if (status === 'completed')          return type === 'tool' ? '⚙' : type === 'constraint' ? '✔' : type === 'human_approval' ? '✓' : '✓';
+    if (status === 'failed')             return '✗';
+    if (status === 'rejected')           return '⊘';
+    if (status === 'skipped')            return '—';
     // pending
-    return type === 'tool' ? '⚙' : type === 'constraint' ? '?' : '○';
+    return type === 'tool' ? '⚙' : type === 'constraint' ? '?' : type === 'human_approval' ? '👤' : '○';
+  }
+
+  function approveStep(stepId) {
+    vscode.postMessage({ command: 'approveStep', instanceId: currentInstance.instanceId, stepId });
+  }
+  function rejectStep(stepId) {
+    vscode.postMessage({ command: 'rejectStep', instanceId: currentInstance.instanceId, stepId });
   }
 
 

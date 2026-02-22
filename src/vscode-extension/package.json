@@ -141,6 +141,16 @@
         "command": "sagIDE.openTaskOutput",
         "title": "SAG: Open Task Output",
         "icon": "$(output)"
+      },
+      {
+        "command": "sagIDE.approveWorkflowStep",
+        "title": "SAG: Approve/Reject Workflow Step",
+        "icon": "$(person)"
+      },
+      {
+        "command": "sagIDE.clearCompletedWorkflows",
+        "title": "SAG: Clear Completed Workflows",
+        "icon": "$(clear-all)"
       }
     ],
     "viewsContainers": {
@@ -257,6 +267,11 @@
           "command": "sagIDE.openWorkflowGraph",
           "when": "view == sagIDE.workflowExplorer && (viewItem == workflowRunning || viewItem == workflowDone || viewItem == workflowPaused)",
           "group": "inline"
+        },
+        {
+          "command": "sagIDE.clearCompletedWorkflows",
+          "when": "view == sagIDE.workflowExplorer && viewItem == workflowRunningGroup",
+          "group": "inline"
         }
       ]
     },
@@ -296,8 +311,30 @@
         },
         "sagIDE.ollama.model": {
           "type": "string",
-          "default": "deepseek-coder:6.7b",
-          "description": "Ollama model to use (e.g., deepseek-coder:6.7b, codellama:13b)"
+          "default": "",
+          "description": "Ollama model identifier used as offline fallback (e.g. qwen2.5-coder:14b). Primary source is appsettings.json via the service."
+        },
+        "sagIDE.ollama.servers": {
+          "type": "array",
+          "default": [],
+          "description": "Ollama servers available in the model picker. Each entry: { key, label, modelId, endpoint, description }",
+          "items": {
+            "type": "object",
+            "required": ["key", "label", "modelId", "endpoint"],
+            "properties": {
+              "key":         { "type": "string", "description": "Unique key used in task affinity mapping" },
+              "label":       { "type": "string", "description": "Display label in the model picker" },
+              "modelId":     { "type": "string", "description": "Ollama model identifier (e.g. qwen2.5-coder:7b-instruct)" },
+              "endpoint":    { "type": "string", "description": "Ollama server base URL (e.g. http://192.168.1.10:11434)" },
+              "description": { "type": "string", "description": "Short description shown next to the model name" }
+            }
+          }
+        },
+        "sagIDE.taskAffinities": {
+          "type": "object",
+          "default": {},
+          "description": "Offline fallback: maps each agent type to a preferred model key. When the service is connected, affinities come from appsettings.json automatically.",
+          "additionalProperties": { "type": "string" }
         },
         "sagIDE.models.codeReview": {
           "type": "string",

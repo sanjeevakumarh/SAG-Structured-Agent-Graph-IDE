@@ -161,7 +161,7 @@ public class GitIntegration
         }
 
         sb.AppendLine();
-        sb.AppendLine("Co-Authored-By: SAG IDE <noreply@example.com>");
+        sb.AppendLine("Co-Authored-By: SAG IDE <noreply@sag-ide.com>");
 
         return sb.ToString();
     }

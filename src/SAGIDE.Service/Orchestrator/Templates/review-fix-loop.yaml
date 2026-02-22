@@ -1,0 +1,17 @@
+name: "Review & Fix Loop"
+description: "Review code, refactor based on feedback, re-review (up to 2 rounds)."
+convergence_policy:
+  max_iterations: 2
+  escalation_target: CANCEL
+  partial_retry_scope: FAILING_NODES_ONLY
+  convergence_hint_memory: false
+steps:
+  - id: review
+    agent: Reviewer
+    prompt: "Review this code thoroughly. Return structured JSON with an 'issues' array."
+  - id: fix
+    agent: Coder
+    depends_on: [review]
+    prompt: "Fix all issues found in this review:\n\n{{review.output}}\n\nApply the fixes to the code."
+    next: review
+    max_iterations: 2

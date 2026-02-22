@@ -1,0 +1,47 @@
+name: "Build & Verify"
+description: "Generate code, build it, check the build passed, then review and document."
+parameters:
+  - name: feature_description
+    type: string
+    default: "the requested feature"
+  - name: build_command
+    type: string
+    default: "dotnet build"
+  - name: workspace_path
+    type: string
+    default: "."
+steps:
+  - id: generate_code
+    agent: Coder
+    prompt: |
+      Implement the following feature: {{feature_description}}
+      Return complete, production-ready code with no placeholders.
+
+  - id: build
+    type: tool
+    depends_on: [generate_code]
+    command: "{{build_command}}"
+    working_dir: "{{workspace_path}}"
+    exit_code_policy: FAIL_ON_NONZERO
+
+  - id: check_build
+    type: constraint
+    depends_on: [build]
+    constraint_expr: "exit_code(build) == 0"
+    on_constraint_fail: fail
+
+  - id: review
+    agent: Reviewer
+    depends_on: [check_build]
+    prompt: |
+      Review this generated code for correctness, performance, and best practices.
+      Build output: {{build.output}}
+      Code: {{generate_code.output}}
+
+  - id: documentation
+    agent: Documenter
+    depends_on: [review]
+    prompt: |
+      Write documentation for this feature.
+      Code: {{generate_code.output}}
+      Review notes: {{review.output}}

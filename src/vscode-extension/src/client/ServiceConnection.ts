@@ -19,6 +19,8 @@ import {
     WorkflowDefinition,
     WorkflowInstance,
     StartWorkflowRequest,
+    WorkflowApprovalNeededPayload,
+    GetModelsResponse,
 } from './MessageProtocol';
 
 export class ServiceConnection implements vscode.Disposable {
@@ -30,6 +32,8 @@ export class ServiceConnection implements vscode.Disposable {
     public readonly onStreamingOutput = this._onStreamingOutput.event;
     private _onWorkflowUpdate = new vscode.EventEmitter<WorkflowInstance>();
     public readonly onWorkflowUpdate = this._onWorkflowUpdate.event;
+    private _onApprovalNeeded = new vscode.EventEmitter<WorkflowApprovalNeededPayload>();
+    public readonly onApprovalNeeded = this._onApprovalNeeded.event;
 
     constructor(pipeName: string) {
         const fullPipeName = process.platform === 'win32'
@@ -63,6 +67,9 @@ export class ServiceConnection implements vscode.Disposable {
             } else if (msg.type === MessageTypes.WorkflowUpdate && msg.payload) {
                 const instance = JSON.parse(msg.payload.toString()) as WorkflowInstance;
                 this._onWorkflowUpdate.fire(instance);
+            } else if (msg.type === MessageTypes.WorkflowApprovalNeeded && msg.payload) {
+                const payload = JSON.parse(msg.payload.toString()) as WorkflowApprovalNeededPayload;
+                this._onApprovalNeeded.fire(payload);
             }
         });
     }
@@ -82,10 +89,9 @@ export class ServiceConnection implements vscode.Disposable {
             payload: Buffer.from(JSON.stringify(request)),
         });
         if (response.payload) {
-            const status = JSON.parse(response.payload.toString()) as TaskStatusResponse;
-            // Fire immediately so the tree shows Queued before the Running broadcast arrives
-            this._onTaskUpdate.fire(status);
-            return status;
+            // The server already broadcasts a Queued update to all clients via BroadcastAsync.
+            // Firing _onTaskUpdate here would produce a duplicate event for the submitting window.
+            return JSON.parse(response.payload.toString()) as TaskStatusResponse;
         }
         return null;
     }
@@ -339,11 +345,37 @@ export class ServiceConnection implements vscode.Disposable {
         return undefined;
     }
 
+    /** Returns the model list and affinities as configured in the service's appsettings.json. */
+    async getModels(): Promise<GetModelsResponse | null> {
+        const response = await this.client.send({
+            type: MessageTypes.GetModels,
+        });
+        if (response.payload) {
+            return JSON.parse(response.payload.toString()) as GetModelsResponse;
+        }
+        return null;
+    }
+
+    /** Approve or reject a human_approval gate step. */
+    async approveWorkflowStep(
+        instanceId: string, stepId: string, approved: boolean, comment?: string
+    ): Promise<WorkflowInstance | undefined> {
+        const response = await this.client.send({
+            type: MessageTypes.ApproveWorkflowStep,
+            payload: Buffer.from(JSON.stringify({ instanceId, stepId, approved, comment })),
+        });
+        if (response.payload) {
+            return JSON.parse(response.payload.toString()) as WorkflowInstance;
+        }
+        return undefined;
+    }
+
     dispose(): void {
         this.client.disconnect();
         this.statusBarItem.dispose();
         this._onTaskUpdate.dispose();
         this._onStreamingOutput.dispose();
         this._onWorkflowUpdate.dispose();
+        this._onApprovalNeeded.dispose();
     }
 }

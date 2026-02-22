@@ -48,4 +48,13 @@ public static class MessageTypes
     public const string PauseWorkflow          = "pause_workflow";
     public const string ResumeWorkflow         = "resume_workflow";
     public const string UpdateWorkflowContext  = "update_workflow_context";
+
+    // Human approval gate
+    /// <summary>Server → client push: a human_approval step is waiting for user input.</summary>
+    public const string WorkflowApprovalNeeded = "workflow_approval_needed";
+    /// <summary>Client → server: user approved or rejected the approval gate.</summary>
+    public const string ApproveWorkflowStep    = "approve_workflow_step";
+
+    /// <summary>Client → server: request the configured model list and task affinities.</summary>
+    public const string GetModels = "get_models";
 }

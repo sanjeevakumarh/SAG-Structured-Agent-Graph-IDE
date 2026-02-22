@@ -1,11 +1,13 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.DTOs;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Communication.Messages;
 using SAGIDE.Service.Orchestrator;
 using SAGIDE.Service.ActivityLogging;
+using SAGIDE.Service.Resilience;
 
 namespace SAGIDE.Service.Communication;
 
@@ -16,20 +18,29 @@ public class MessageHandler
     private readonly GitIntegration _gitIntegration;
     private readonly Infrastructure.GitConfig? _gitConfig;
     private readonly WorkflowEngine _workflowEngine;
+    private readonly IConfiguration _configuration;
+    private readonly TaskAffinitiesConfig _taskAffinities;
     private readonly ILogger<MessageHandler> _logger;
     private static readonly JsonSerializerOptions JsonOptions = NamedPipeServer.JsonOptions;
 
-    public MessageHandler(AgentOrchestrator orchestrator, ActivityLogger activityLogger,
-        GitIntegration gitIntegration, WorkflowEngine workflowEngine,
+    public MessageHandler(
+        AgentOrchestrator orchestrator,
+        ActivityLogger activityLogger,
+        GitIntegration gitIntegration,
+        WorkflowEngine workflowEngine,
+        IConfiguration configuration,
+        TaskAffinitiesConfig taskAffinities,
         ILogger<MessageHandler> logger,
         Infrastructure.GitConfig? gitConfig = null)
     {
-        _orchestrator = orchestrator;
-        _activityLogger = activityLogger;
-        _gitIntegration = gitIntegration;
-        _workflowEngine = workflowEngine;
-        _gitConfig = gitConfig;
-        _logger = logger;
+        _orchestrator    = orchestrator;
+        _activityLogger  = activityLogger;
+        _gitIntegration  = gitIntegration;
+        _workflowEngine  = workflowEngine;
+        _configuration   = configuration;
+        _taskAffinities  = taskAffinities;
+        _gitConfig       = gitConfig;
+        _logger          = logger;
     }
 
     private static T Deserialize<T>(byte[] bytes) => JsonSerializer.Deserialize<T>(bytes, JsonOptions)!;
@@ -66,6 +77,8 @@ public class MessageHandler
                 MessageTypes.PauseWorkflow         => await HandlePauseWorkflow(message, ct),
                 MessageTypes.ResumeWorkflow        => await HandleResumeWorkflow(message, ct),
                 MessageTypes.UpdateWorkflowContext => await HandleUpdateWorkflowContext(message, ct),
+                MessageTypes.ApproveWorkflowStep   => await HandleApproveWorkflowStep(message, ct),
+                MessageTypes.GetModels             => HandleGetModels(message),
                 _ => CreateError(message.RequestId, $"Unknown message type: {message.Type}")
             };
         }
@@ -344,6 +357,179 @@ public class MessageHandler
         {
             Type = MessageTypes.WorkflowUpdate, RequestId = message.RequestId,
             Payload = instance is not null ? Serialize(instance) : null
+        };
+    }
+
+    private async Task<PipeMessage> HandleApproveWorkflowStep(PipeMessage message, CancellationToken ct)
+    {
+        var req = Deserialize<ApproveWorkflowStepRequest>(message.Payload!);
+        await _workflowEngine.ApproveWorkflowStepAsync(
+            req.InstanceId, req.StepId, req.Approved, req.Comment, ct);
+        var instance = _workflowEngine.GetInstance(req.InstanceId);
+        return new PipeMessage
+        {
+            Type = MessageTypes.WorkflowUpdate, RequestId = message.RequestId,
+            Payload = instance is not null ? Serialize(instance) : null
+        };
+    }
+
+    // ── GetModels — returns configured model list + affinities from appsettings ─
+
+    private PipeMessage HandleGetModels(PipeMessage message)
+    {
+        // Build Ollama model options from SAGIDE:Ollama:Servers config
+        var models = new List<object>();
+        var serversSection = _configuration.GetSection("SAGIDE:Ollama:Servers");
+        foreach (var server in serversSection.GetChildren())
+        {
+            var name    = server["Name"]    ?? "ollama";
+            var baseUrl = server["BaseUrl"] ?? "";
+            foreach (var modelEntry in server.GetSection("Models").GetChildren())
+            {
+                var modelId = modelEntry.Value ?? "";
+                if (string.IsNullOrEmpty(modelId)) continue;
+                var key = $"ollama-{name}-{modelId}";
+                models.Add(new
+                {
+                    key,
+                    label       = $"{name} / {modelId}  [Local]",
+                    provider    = "ollama",
+                    modelId,
+                    endpoint    = baseUrl,
+                    description = $"Ollama on {name}",
+                });
+            }
+        }
+
+        // Build OpenAI-compatible model options from SAGIDE:OpenAICompatible:Servers config
+        var openAiCompatibleSection = _configuration.GetSection("SAGIDE:OpenAICompatible:Servers");
+        foreach (var server in openAiCompatibleSection.GetChildren())
+        {
+            var name    = server["Name"]    ?? "local";
+            var baseUrl = server["BaseUrl"] ?? "";
+            foreach (var modelEntry in server.GetSection("Models").GetChildren())
+            {
+                var modelId = modelEntry.Value ?? "";
+                if (string.IsNullOrEmpty(modelId)) continue;
+                var key = $"codex-{name}-{modelId}";
+                models.Add(new
+                {
+                    key,
+                    label       = $"{name} / {modelId}  [Local]",
+                    provider    = "codex",
+                    modelId,
+                    endpoint    = baseUrl,
+                    description = $"OpenAI-compatible on {name}",
+                });
+            }
+        }
+
+        // Build cloud model options — always include so users can see and select them;
+        // mark unconfigured ones so users know they need to set an API key.
+        var anthropicKey = _configuration["SAGIDE:ApiKeys:Anthropic"] ?? "";
+        var openaiKey    = _configuration["SAGIDE:ApiKeys:OpenAI"]    ?? "";
+        var googleKey    = _configuration["SAGIDE:ApiKeys:Google"]    ?? "";
+
+        static string ProviderHuman(string provider) => provider.ToUpperInvariant() switch
+        {
+            "CLAUDE" => "Anthropic",
+            "CODEX"  => "OpenAI",
+            "GEMINI" => "Google",
+            _        => provider,
+        };
+        bool HasKey(string provider) => provider.ToUpperInvariant() switch
+        {
+            "CLAUDE" => !string.IsNullOrEmpty(anthropicKey),
+            "CODEX"  => !string.IsNullOrEmpty(openaiKey),
+            "GEMINI" => !string.IsNullOrEmpty(googleKey),
+            _        => false,
+        };
+        string ProviderShort(string provider) => provider.ToLowerInvariant() switch
+        {
+            "claude" => "claude",
+            "codex"  => "codex",
+            "gemini" => "gemini",
+            _        => provider.ToLowerInvariant(),
+        };
+        // appsettings key name to set for each cloud provider
+        static string ApiKeySettingName(string provider) => provider.ToUpperInvariant() switch
+        {
+            "CLAUDE" => "SAGIDE:ApiKeys:Anthropic",
+            "CODEX"  => "SAGIDE:ApiKeys:OpenAI",
+            "GEMINI" => "SAGIDE:ApiKeys:Google",
+            _        => $"SAGIDE:ApiKeys:{provider}",
+        };
+
+        var cloudSeen = new HashSet<string>();
+        foreach (var (_, entry) in _taskAffinities.Affinities)
+        {
+            if (string.IsNullOrEmpty(entry.CloudModel) || string.IsNullOrEmpty(entry.CloudProvider))
+                continue;
+
+            var cKey = $"{ProviderShort(entry.CloudProvider)}-{entry.CloudModel}";
+            if (!cloudSeen.Add(cKey)) continue;
+
+            var hasKey  = HasKey(entry.CloudProvider);
+            var descr   = hasKey
+                ? $"{ProviderHuman(entry.CloudProvider)} cloud model"
+                : $"{ProviderHuman(entry.CloudProvider)} — set {ApiKeySettingName(entry.CloudProvider)} in appsettings.json";
+
+            models.Add(new
+            {
+                key         = cKey,
+                label       = hasKey
+                    ? $"{entry.CloudModel}  [Cloud / {ProviderHuman(entry.CloudProvider)}]"
+                    : $"{entry.CloudModel}  [Cloud / {ProviderHuman(entry.CloudProvider)} — no key]",
+                provider    = ProviderShort(entry.CloudProvider),
+                modelId     = entry.CloudModel,
+                endpoint    = (string?)null,
+                description = descr,
+            });
+        }
+
+        // Build affinities: agentType → recommended model key
+        // Prefer cloud if key is configured; fall back to the first Ollama model matching LocalModel
+        var allLocalOptions = models
+            .OfType<object>()
+            .Select(m =>
+            {
+                // Use reflection-free anonymous type access via JSON round-trip
+                var j = JsonDocument.Parse(JsonSerializer.Serialize(m, JsonOptions));
+                return (
+                    key:     j.RootElement.GetProperty("key").GetString() ?? "",
+                    modelId: j.RootElement.GetProperty("modelId").GetString() ?? "",
+                    provider:j.RootElement.GetProperty("provider").GetString() ?? ""
+                );
+            })
+            .Where(m => m.provider is "ollama" or "codex")
+            .ToList();
+
+        var affinities = new Dictionary<string, string>();
+        foreach (var (agentType, entry) in _taskAffinities.Affinities)
+        {
+            var cloudKey = string.IsNullOrEmpty(entry.CloudModel) || string.IsNullOrEmpty(entry.CloudProvider)
+                ? null
+                : $"{ProviderShort(entry.CloudProvider)}-{entry.CloudModel}";
+
+            if (cloudKey is not null && HasKey(entry.CloudProvider))
+            {
+                affinities[agentType] = cloudKey;
+                continue;
+            }
+
+            // Fall back to local: find first local option (Ollama or OpenAI-compatible) matching LocalModel
+            if (!string.IsNullOrEmpty(entry.LocalModel))
+            {
+                var match = allLocalOptions.FirstOrDefault(m => m.modelId == entry.LocalModel);
+                if (match.key != "") { affinities[agentType] = match.key; continue; }
+            }
+        }
+
+        return new PipeMessage
+        {
+            Type      = MessageTypes.GetModels,
+            RequestId = message.RequestId,
+            Payload   = Serialize(new { models, affinities }),
         };
     }
 

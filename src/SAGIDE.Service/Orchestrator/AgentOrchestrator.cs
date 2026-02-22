@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.DTOs;
 using SAGIDE.Core.Interfaces;
@@ -10,7 +12,7 @@ using SAGIDE.Service.ActivityLogging;
 
 namespace SAGIDE.Service.Orchestrator;
 
-public class AgentOrchestrator
+public class AgentOrchestrator : ITaskSubmissionService
 {
     private readonly TaskQueue _taskQueue;
     private readonly IServiceProvider _serviceProvider;
@@ -22,7 +24,6 @@ public class AgentOrchestrator
     private readonly ActivityLogger? _activityLogger;
     private readonly Infrastructure.GitService? _gitService;
     private readonly Infrastructure.GitConfig? _gitConfig;
-    private WorkflowEngine? _workflowEngine;    // set post-construction to break circular dependency
     private readonly ILogger<AgentOrchestrator> _logger;
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _runningTasks = new();
     private readonly SemaphoreSlim _concurrencyLimiter;
@@ -70,10 +71,7 @@ public class AgentOrchestrator
         _concurrencyLimiter = new SemaphoreSlim(maxConcurrentTasks, maxConcurrentTasks);
     }
 
-    /// <summary>Set by Program.cs after both services are constructed (breaks circular dependency).</summary>
-    public void SetWorkflowEngine(WorkflowEngine engine) => _workflowEngine = engine;
-
-    // R001: Idempotent — duplicate task ID returns existing, no re-execution
+    // Idempotent — duplicate task ID returns existing, no re-execution
     public async Task<string> SubmitTaskAsync(AgentTask task, CancellationToken ct)
     {
         var existing = _taskQueue.GetTask(task.Id);
@@ -195,7 +193,7 @@ public class AgentOrchestrator
                 return;
             }
 
-            // R004: Max iteration support — each iteration feeds the previous result back into the
+            // Max iteration support — each iteration feeds the previous result back into the
             // prompt so the agent can self-refine.  The default limit is 1 for most agent types,
             // making the loop effectively single-shot.  Refactoring agents default to 5.
             var maxIterations = _agentLimitsConfig.GetMaxIterations(task.AgentType);
@@ -206,6 +204,45 @@ public class AgentOrchestrator
                 Endpoint: string.IsNullOrEmpty(modelEndpointOverride) ? null : modelEndpointOverride);
             string lastResponse = "";
 
+            // Determinism — check output cache before calling the model.
+            // Cache key: SHA-256 of (prompt + modelId + provider) — sufficient for replay uniqueness.
+            var cacheKey = ComputeCacheKey(basePrompt, task.ModelId, task.ModelProvider.ToString());
+            if (!task.ForceRerun && _repository is not null)
+            {
+                var cached = await _repository.GetCachedOutputAsync(cacheKey);
+                if (cached is not null)
+                {
+                    _logger.LogInformation(
+                        "Task {TaskId}: cache hit for model {Model} — skipping LLM call",
+                        task.Id, task.ModelId);
+                    lastResponse = cached;
+                    task.Metadata["response"]    = lastResponse;
+                    task.Metadata["cacheHit"]    = "true";
+                    task.Metadata["issueCount"]  = "0";
+                    task.Metadata["changeCount"] = "0";
+                    task.Metadata["issuesJson"]  = "[]";
+                    task.Metadata["changesJson"] = "[]";
+                    // Re-parse the cached output so issues/changes are correctly surfaced
+                    var cachedResult = _resultParser.Parse(task.Id, task.AgentType, lastResponse, 0);
+                    task.Metadata["issueCount"]  = cachedResult.Issues.Count.ToString();
+                    task.Metadata["changeCount"] = cachedResult.Changes.Count.ToString();
+                    task.Metadata["issuesJson"]  = System.Text.Json.JsonSerializer.Serialize(cachedResult.Issues);
+                    task.Metadata["changesJson"] = System.Text.Json.JsonSerializer.Serialize(cachedResult.Changes);
+                    await PersistResultAsync(cachedResult);
+
+                    task.Progress = 100;
+                    task.Status = AgentTaskStatus.Completed;
+                    task.StatusMessage = "Done (cached)";
+                    task.CompletedAt = DateTime.UtcNow;
+                    BroadcastUpdate(task);
+                    await PersistTaskAsync(task);
+
+                    if (task.Metadata.ContainsKey("workflowInstanceId"))
+                        _ = _serviceProvider.GetService<WorkflowEngine>()?.OnTaskUpdateAsync(ToResponse(task));
+                    return;
+                }
+            }
+
             for (int iteration = 1; iteration <= maxIterations; iteration++)
             {
                 taskCt.ThrowIfCancellationRequested();
@@ -215,7 +252,9 @@ public class AgentOrchestrator
                     prompt = $"[Iteration {iteration}/{maxIterations}] Your previous output:\n\n{lastResponse}\n\n" +
                              $"Please refine and improve your answer. Original task:\n\n{basePrompt}";
 
-                task.Progress = (int)(((double)iteration / maxIterations) * 80);
+                // Start at a low value so progress honestly reflects work not yet done.
+                // (iteration-1)/max * 75 spaces out multi-iteration progress; +5 avoids 0%.
+                task.Progress = (int)(((double)(iteration - 1) / maxIterations) * 75) + 5;
                 task.StatusMessage = maxIterations > 1
                     ? $"Iteration {iteration}/{maxIterations} — sending to {task.ModelProvider}..."
                     : $"Sending to {task.ModelProvider}...";
@@ -226,6 +265,11 @@ public class AgentOrchestrator
                 var sw = System.Diagnostics.Stopwatch.StartNew();
                 lastResponse = await StreamToStringAsync(provider, prompt, modelConfig, task, taskCt);
                 sw.Stop();
+
+                // After streaming completes, show a brief "Parsing" state before the final 100%.
+                task.Progress = (int)((double)iteration / maxIterations * 80);
+                task.StatusMessage = "Parsing results...";
+                BroadcastUpdate(task);
 
                 task.Metadata["latencyMs"] = sw.ElapsedMilliseconds.ToString();
 
@@ -261,9 +305,15 @@ public class AgentOrchestrator
             BroadcastUpdate(task);
             await PersistTaskAsync(task);
 
+            // Determinism — store final output in cache (fire-and-forget, non-fatal)
+            if (_repository is not null && !string.IsNullOrEmpty(lastResponse))
+                _ = _repository.StoreCachedOutputAsync(cacheKey, lastResponse, task.ModelId)
+                    .ContinueWith(t => _logger.LogWarning(t.Exception, "Cache store failed for task {TaskId}", task.Id),
+                        System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
+
             // Notify workflow engine so the DAG can advance to the next step
-            if (_workflowEngine is not null && task.Metadata.ContainsKey("workflowInstanceId"))
-                _ = _workflowEngine.OnTaskUpdateAsync(ToResponse(task));
+            if (task.Metadata.ContainsKey("workflowInstanceId"))
+                _ = _serviceProvider.GetService<WorkflowEngine>()?.OnTaskUpdateAsync(ToResponse(task));
 
             // Git auto-commit: write result to sag-agent-log branch (fire-and-forget, non-fatal)
             if (_gitConfig?.AutoCommitResults == true && _gitService?.IsAvailable == true
@@ -279,7 +329,9 @@ public class AgentOrchestrator
             // Log activity for task completion
             if (_activityLogger != null && task.Metadata.TryGetValue("workspacePath", out var workspacePath))
             {
-                var result = await _repository?.GetResultAsync(task.Id);
+                var result = _repository != null
+                    ? await _repository.GetResultAsync(task.Id)
+                    : null;
                 var details = result != null ? System.Text.Json.JsonSerializer.Serialize(result) : null;
 
                 await _activityLogger.LogActivityAsync(new ActivityEntry
@@ -380,6 +432,14 @@ public class AgentOrchestrator
                     TokensGeneratedSoFar = tokenCount,
                     IsLastChunk = false,
                 });
+
+                // Update task progress based on token count (soft-caps near 78% asymptotically).
+                // ~2 000 tokens ≈ 50 %, ~4 000 tokens ≈ 75 %, approaching but never reaching 78 %.
+                var streamProgress = (int)(78.0 * (1.0 - Math.Exp(-tokenCount / 2000.0)));
+                task.Progress = Math.Max(task.Progress, Math.Max(5, streamProgress));
+                task.StatusMessage = $"Streaming… {tokenCount:N0} tokens";
+                BroadcastUpdate(task);
+
                 lastBroadcast = now;
                 lastBroadcastLength = currentLength;
             }
@@ -408,8 +468,8 @@ public class AgentOrchestrator
         await PersistTaskAsync(task);
 
         // Notify workflow engine so downstream steps can be skipped
-        if (_workflowEngine is not null && task.Metadata.ContainsKey("workflowInstanceId"))
-            _ = _workflowEngine.OnTaskUpdateAsync(ToResponse(task));
+        if (task.Metadata.ContainsKey("workflowInstanceId"))
+            _ = _serviceProvider.GetService<WorkflowEngine>()?.OnTaskUpdateAsync(ToResponse(task));
 
         _deadLetterQueue.Enqueue(task, errorMessage, errorCode, retryCount);
 
@@ -460,6 +520,16 @@ public class AgentOrchestrator
                 break;
 
             case AgentTaskStatus.Running:
+                // Immediately mark Cancelled and broadcast so the UI updates without waiting
+                // for the LLM request to finish.  ExecuteTaskAsync's catch block will fire
+                // another Cancelled broadcast — that's idempotent and handled by the dedup on
+                // the extension side.
+                task.Status = AgentTaskStatus.Cancelled;
+                task.CompletedAt = DateTime.UtcNow;
+                task.StatusMessage = "Cancelled by user";
+                BroadcastUpdate(task);
+                await PersistTaskAsync(task);
+                await LogCancellationActivity(task, "Cancelled while running", ct);
                 if (_runningTasks.TryRemove(taskId, out var cts))
                 {
                     cts.Cancel();
@@ -562,6 +632,9 @@ public class AgentOrchestrator
     private void BroadcastUpdate(AgentTask task)
     {
         OnTaskUpdate?.Invoke(ToResponse(task));
+        // Register terminal tasks for bounded in-memory history eviction
+        if (task.Status is AgentTaskStatus.Completed or AgentTaskStatus.Failed or AgentTaskStatus.Cancelled)
+            _taskQueue.MarkTerminal(task.Id);
     }
 
     private static TaskStatusResponse ToResponse(AgentTask task)
@@ -622,6 +695,14 @@ public class AgentOrchestrator
         if (_repository is null) return;
         try { await _repository.SaveResultAsync(result); }
         catch (Exception ex) { _logger.LogError(ex, "Failed to persist result for task {TaskId}", result.TaskId); }
+    }
+
+    // Determinism — SHA-256 output cache key
+    private static string ComputeCacheKey(string prompt, string modelId, string provider)
+    {
+        var raw = $"{provider}:{modelId}:{prompt}";
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
+        return Convert.ToHexString(hash).ToLowerInvariant();
     }
 
     // Per-file character cap: keeps individual files from inflating the prompt beyond

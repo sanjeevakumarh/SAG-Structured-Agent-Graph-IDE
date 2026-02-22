@@ -1,3 +1,5 @@
+using SAGIDE.Core.DTOs;
+
 namespace SAGIDE.Core.Models;
 
 /// <summary>
@@ -32,6 +34,20 @@ public class WorkflowInstance
 
     /// <summary>Workspace path stored so the instance can be recovered from DB after restart.</summary>
     public string? WorkspacePath { get; set; }
+
+    /// <summary>
+    /// Per-step model overrides captured at launch time (keyed by step ID).
+    /// Checked after the YAML-baked step model but before the instance default and affinities.
+    /// </summary>
+    public Dictionary<string, StepModelOverride> StepModelOverrides { get; set; } = [];
+}
+
+public class AuditEntry
+{
+    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
+    public WorkflowStepStatus FromStatus { get; set; }
+    public WorkflowStepStatus ToStatus { get; set; }
+    public string? Reason { get; set; }
 }
 
 public class WorkflowStepExecution
@@ -42,6 +58,9 @@ public class WorkflowStepExecution
     public string? TaskId { get; set; }
 
     public WorkflowStepStatus Status { get; set; } = WorkflowStepStatus.Pending;
+
+    /// <summary>State-transition log written on every status change (§2.1 BaseNode contract).</summary>
+    public List<AuditEntry> AuditLog { get; set; } = [];
 
     /// <summary>Raw LLM output from the completed step.</summary>
     public string? Output { get; set; }
@@ -57,6 +76,19 @@ public class WorkflowStepExecution
 
     /// <summary>Exit code from a tool step execution. Null for agent / router / constraint steps.</summary>
     public int? ExitCode { get; set; }
+
+    /// <summary>
+    /// Issue count from the prior loop iteration, used for contradiction detection (§2.2).
+    /// Set just before a new iteration is started; compared against the new iteration's result.
+    /// </summary>
+    public int PreviousIssueCount { get; set; }
+
+    /// <summary>
+    /// MACP IntentPackage produced by this step (§2.5).
+    /// Populated by agent steps when the model response includes a structured intent block.
+    /// Null for tool, constraint, router, and human_approval steps.
+    /// </summary>
+    public IntentPackage? IntentPackage { get; set; }
 }
 
 public enum WorkflowStatus
@@ -75,4 +107,8 @@ public enum WorkflowStepStatus
     Completed,
     Failed,
     Skipped,
+    /// <summary>Step is a human_approval gate; waiting for user to approve or reject.</summary>
+    WaitingForApproval,
+    /// <summary>Human rejected the approval gate; downstream steps are skipped.</summary>
+    Rejected,
 }

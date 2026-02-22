@@ -31,7 +31,7 @@ public class GitService
         Directory.Exists(Path.Combine(workspacePath, ".git"));
 
     /// <summary>Cleans up any stale worktrees left by a previous crash. Called on startup.</summary>
-    public async Task PruneStaleWorktreesAsync(CancellationToken ct = default)
+    public Task PruneStaleWorktreesAsync(CancellationToken ct = default)
     {
         // Find any worktree paths in temp that look like ours
         var tmpDir = Path.GetTempPath();
@@ -41,6 +41,8 @@ public class GitService
             _logger.LogInformation("Cleaning up stale git worktree: {Path}", wt);
             try { Directory.Delete(wt, recursive: true); } catch { /* best effort */ }
         }
+
+        return Task.CompletedTask;
     }
 
     /// <summary>

@@ -36,7 +36,8 @@ public class ServiceLifetime : BackgroundService
             _ = _pipeServer.BroadcastAsync(msg);
         };
 
-        // Broadcast streaming output chunks (throttled ~200ms in orchestrator).
+        // Route streaming output only to the VS Code window that submitted the task.
+        // Other windows should not receive (and auto-open panels for) unrelated tasks.
         _orchestrator.OnStreamingOutput += streamMsg =>
         {
             var msg = new PipeMessage
@@ -44,7 +45,11 @@ public class ServiceLifetime : BackgroundService
                 Type = MessageTypes.StreamingOutput,
                 Payload = JsonSerializer.SerializeToUtf8Bytes(streamMsg, NamedPipeServer.JsonOptions),
             };
-            _ = _pipeServer.BroadcastAsync(msg);
+            var clientId = _pipeServer.GetTaskOwner(streamMsg.TaskId);
+            if (clientId is not null)
+                _ = _pipeServer.SendToClientAsync(clientId, msg);
+            else
+                _ = _pipeServer.BroadcastAsync(msg);  // fallback for workflow-submitted tasks
         };
 
         // Broadcast workflow instance updates (step completions, status changes).
@@ -54,6 +59,18 @@ public class ServiceLifetime : BackgroundService
             {
                 Type = MessageTypes.WorkflowUpdate,
                 Payload = JsonSerializer.SerializeToUtf8Bytes(instance, NamedPipeServer.JsonOptions),
+            };
+            _ = _pipeServer.BroadcastAsync(msg);
+        };
+
+        // Broadcast human approval requests to the VS Code client.
+        _workflowEngine.OnApprovalNeeded += (instanceId, stepId, prompt) =>
+        {
+            var msg = new PipeMessage
+            {
+                Type = MessageTypes.WorkflowApprovalNeeded,
+                Payload = JsonSerializer.SerializeToUtf8Bytes(
+                    new { instanceId, stepId, prompt }, NamedPipeServer.JsonOptions),
             };
             _ = _pipeServer.BroadcastAsync(msg);
         };

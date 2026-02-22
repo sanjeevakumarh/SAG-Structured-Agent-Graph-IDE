@@ -1,0 +1,10 @@
+name: "Write & Test"
+description: "Refactor code then generate comprehensive tests."
+steps:
+  - id: refactor
+    agent: Coder
+    prompt: "Refactor and improve this code."
+  - id: tests
+    agent: Tester
+    depends_on: [refactor]
+    prompt: "Generate comprehensive tests for:\n\n{{refactor.output}}"
