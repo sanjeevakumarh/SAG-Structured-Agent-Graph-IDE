@@ -1,22 +1,22 @@
 # SAG(Structured Agent Graph) IDE
 
-Local-first deterministic workflow runtime for agent-native engineering.
+Local-first deterministic workflow + RAG runtime for agent-native engineering.
 
-Built as a .NET 9 orchestration service with SQLite WAL persistence plus a thin VS Code extension (5 interactive panels, <10ms latency broadcasts). Runs fully local with Ollama or TensorRT-LLM (edge devices like Orin Nano); swap to Claude, Codex, or Gemini by adding keys.
+Built as a .NET 9 orchestration service with SQLite WAL persistence, prompt registry/templates, scheduler, and RAG pipeline (fetch → chunk → embed → vector search) plus a thin VS Code extension. Runs fully local with Ollama; swap to Claude/Codex/Gemini by adding keys.
 
 ## What makes this different
-- Local-first, provider-agnostic: works fully offline with Ollama or TensorRT-LLM (edge devices: Orin Nano, Jetson, etc.); 6 agent types × N models with affinity routing—no Copilot-first bias.
-- Workflow-first: queueing/scheduling, persistence, DLQ, and policy-driven retry/timeout policies (exponential backoff, fixed backoff) make it a small workflow platform embedded in the editor. Tasks persist to completion even if the editor closes.
-- Split architecture: orchestration engine lives in a .NET service; the VS Code extension is a thin UI connected over named pipes with <10ms round-trip latency. Status broadcasts reach all clients in <0.5ms.
-- Workflow engine: DAGs, conditional routers, pause/resume, human approval gates ("WaitingApproval" status with diff review), and auditable activity logs—closer to a mini Temporal/Airflow than typical agent chat wrappers.
+- Local-first, provider-agnostic: works fully offline with Ollama; affinity routing spans local/cloud (Claude/Codex/Gemini) and multiple Ollama hosts.
+- Workflow + RAG: queueing/scheduling, DLQ, retries/timeouts, prompt registry/templates, and a built-in RAG pipeline (web fetch/search, chunk, embed, vector search) that feeds orchestrated subtasks.
+- Split architecture: orchestration engine in a .NET service; thin VS Code extension over named pipes (<10ms). Broadcasts reach all clients fast and don’t burden the extension host.
+- Workflow engine: DAGs, routers, pause/resume, human approval gates, auditable activity logs—closer to a mini Temporal/Airflow than chat UIs.
 
 ## Capabilities
-- Task orchestration with queueing, scheduling, DLQ, persistence, retry/timeout policies, and 50-entry history limit.
-- Workflow engine with DAGs, router nodes, pause/resume, human approval gates, context variable substitution ({{var}}) during execution, and Git-linked activity logging.
-- Multi-provider LLM support (Claude, Codex, Gemini, Ollama) with real-time streaming output, token counting, and structured JSON/markdown parsing for issues (file/line/severity/fix) and file changes.
-- VS Code UI: Active Tasks tree, History (50 entries), DLQ with retry/discard, Workflow Explorer with DAG graph visualization, Streaming Output panel, Diff Approval panel with Apply/Skip per-file, Comparison panel (side-by-side multi-model results), Problems panel integration.
-- Comparison groups: submit the same task description to N models, track all as a group, show side-by-side results when all complete.
-- Configurable concurrency: max_concurrent_agents (default 5), per-provider timeout overrides, task priority queue.
+- Task orchestration with queueing, scheduler, DLQ, persistence, retry/timeout policies.
+- Workflow engine with DAGs/routers/pause/resume/human approval gates, context var substitution ({{var}}), Git-linked activity logging, and prompt registry/templates loaded from `prompts/`.
+- RAG pipeline: web fetch/search, text chunking, embeddings, vector search, cache, and safety redaction feeding orchestrated subtasks.
+- Multi-provider LLM support (Claude, Codex, Gemini, Ollama) with streaming, token counting, structured parsing, and affinity-based model routing across multiple Ollama hosts.
+- VS Code UI: Active Tasks, History, DLQ, Workflow Explorer graph, Streaming Output, Diff Approval, Comparison panel, Problems integration.
+- Extras: CLI (`tools/cli/sag`), Logseq plugin scaffold, build/deploy helpers (`utils/*.ps1`/`.sh`), comparison groups, configurable concurrency.
 
 ## Architecture (high level)
 
@@ -66,8 +66,8 @@ sequenceDiagram
 ### Prerequisites
 - VS Code 1.85+
 - .NET SDK 9.0
-- Node.js 18+ and npm
-- Optional: Ollama for local models
+- Node.js 20+ and npm 10+
+- Optional: Ollama for local models and SearXNG for RAG web search
 
 ### 1) Clone
 ```bash
@@ -77,32 +77,39 @@ cd SAGExtention
 
 ### 2) Start the orchestration service
 ```bash
-cd src/SAGIDE.Service
-dotnet run
+dotnet run --project src/SAGIDE.Service/SAGIDE.Service.csproj
 ```
-Leave this running; it hosts named pipes, task orchestration with concurrent execution and queue, SQLite WAL persistence (~50 task history limit), and provider routing to Claude, Codex, Gemini, or Ollama.
+Leave this running; it hosts named pipes, task orchestration with scheduler/queue/DLQ, SQLite WAL persistence (~50 task history limit), prompt registry/templates, RAG pipeline, and provider routing.
 
 ### 3) Start the VS Code extension
 1. Open the repo in VS Code.
 2. Open `src/vscode-extension`.
 3. Install deps:
    ```bash
-   npm install
+  npm ci
    ```
 4. Press F5 to launch the Extension Development Host.
 
-### 4) Run a task or workflow
+### 4) Optional: start CLI
+```bash
+dotnet run --project tools/cli/sag/sag.csproj -- --help
+```
+
+### 5) Optional: start Logseq plugin (dev)
+- Install Logseq, enable dev plugins, and point to `tools/logseq-plugin` after running `npm install && npm run build` there.
+
+### 6) Run a task or workflow
 - In the Extension Host window, open a code file.
 - Press Ctrl+Shift+P and run `SAG: Submit Task`.
 - Choose an agent and model (local or paid).
 - Watch Active Tasks, Streaming Output, and History panes.
 
-## Model configuration
+## Model and RAG configuration
 Configuration lives in two places:
-- Service: `src/SAGIDE.Service/appsettings.json`
+- Service: `src/SAGIDE.Service/appsettings.json` (or appsettings.Template.json as a starter)
 - Extension: `sagIDE.*` VS Code settings
 
-### Local (Ollama or TensorRT-LLM)
+### Local (Ollama)
 1. Install Ollama: https://ollama.com (or TensorRT-LLM for edge devices like Orin Nano / Jetson)
 2. Pull a model:
    ```bash
@@ -117,31 +124,32 @@ Configuration lives in two places:
    curl http://localhost:11434/api/tags
    ```
 
-Service example:
+Service example (trim to your hosts/models):
 ```json
 {
-  "AgenticIDE": {
-    "NamedPipeName": "AgenticIDEPipe",
+  "SAGIDE": {
+    "PromptsPath": "../../prompts",
+    "NamedPipeName": "SAGIDEPipe",
     "MaxConcurrentAgents": 5,
+    "Scheduler": { "Enabled": true },
+    "Providers": { "Claude": { "MaxTokens": 4096 }, "Gemini": { "MaxTokens": 4096 }, "Codex": { "MaxTokens": 4096 }, "Ollama": { "MaxTokens": 4096 } },
+    "Rag": { "EmbeddingBatchSize": 32, "ChunkSize": 1500, "ChunkOverlap": 200, "CacheTtlHours": 4, "RateLimitDelayMs": 1000 },
     "Ollama": {
-      "DefaultServer": "http://localhost:11434",
       "Servers": [
-        {
-          "Name": "localhost",
-          "BaseUrl": "http://localhost:11434",
-          "Models": ["qwen2.5-coder:7b-instruct"]
-        }
+        { "Name": "localhost", "BaseUrl": "http://localhost:11434", "RagOrder": 0, "SearchUrl": "http://localhost:8888", "Models": ["nomic-embed-text", "qwen2.5-coder:7b-instruct"] }
       ]
-    }
+    },
+    "OpenAICompatible": { "Servers": [] },
+    "ApiKeys": { "Anthropic": "", "OpenAI": "", "Google": "" }
   }
 }
 ```
 
 ### Paid providers
-Add keys to `appsettings.json` under `AgenticIDE:ApiKeys`:
+Add keys to `appsettings.json` under `SAGIDE:ApiKeys`:
 ```json
 {
-  "AgenticIDE": {
+  "SAGIDE": {
     "ApiKeys": {
       "Anthropic": "YOUR_KEY",
       "OpenAI": "YOUR_KEY",
@@ -153,8 +161,9 @@ Add keys to `appsettings.json` under `AgenticIDE:ApiKeys`:
 Then select the provider in `SAG: Submit Task`.
 
 
-## Defining Workflows (YAML)
-Workflows live in `.agentide/workflows/*.yaml`. They support DAG dependencies, conditional routing (if: "{{condition}}"), context variable passing ({{var}} substitution), human approval gates ("WaitingApproval" status), and convergence policies (retry scoping, timeout per iteration, escalation targets).
+## Defining Workflows and Prompts (YAML)
+- Prompts/templates live under `prompts/` and are loaded by the Prompt Registry.
+- Workflows live in `.agentide/workflows/*.yaml` (or built-in templates); they support DAG dependencies, conditional routing, context vars, human approval gates, and convergence policies.
 
 ```yaml
 name: "Refactor and Test"
