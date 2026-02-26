@@ -48,6 +48,10 @@ export const MessageTypes = {
 
     // Model discovery
     GetModels: 'get_models',
+
+    // Pipe authentication handshake
+    PipeAuth:   'pipe_auth',
+    PipeAuthOk: 'pipe_auth_ok',
 } as const;
 
 export type ModelProvider = 'claude' | 'codex' | 'gemini' | 'ollama';

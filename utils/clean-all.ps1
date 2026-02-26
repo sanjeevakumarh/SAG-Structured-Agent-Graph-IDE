@@ -26,6 +26,11 @@ try {
 
     Get-ChildItem -Path . -Recurse -File -Filter 'package-lock.json' -ErrorAction SilentlyContinue |
         ForEach-Object { Remove-PathSafe $_.FullName }
+
+    foreach ($pattern in @('*.bak', '*.vsix')) {
+        Get-ChildItem -Path . -Recurse -File -Filter $pattern -ErrorAction SilentlyContinue |
+            ForEach-Object { Remove-PathSafe $_.FullName }
+    }
 }
 finally {
     Pop-Location

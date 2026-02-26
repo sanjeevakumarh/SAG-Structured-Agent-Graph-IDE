@@ -47,6 +47,10 @@ sequenceDiagram
 - Works cross-platform; service can be restarted independently of VS Code. Binary framing (4-byte length prefix) ensures message boundary integrity.
 - ProviderFactory routes tasks to 4 HTTP providers (Claude, Codex, Gemini), Ollama, or TensorRT-LLM with affinity-based server selection.
 
+## Updates (2026-02-26)
+- Hardened orchestration and persistence: TaskQueue/WorkflowEngine/SubtaskCoordinator refinements, status/retry semantics, and tightened pipe/message handling.
+- Provider/timeout resilience tuning plus expanded tests (agent limits, retries/timeouts, DLQ, workflow engine, environment leak checks).
+
 ## Updates (2026-02-25)
 - Added full RAG pipeline and orchestration stack (workflow engine, prompt registry/templates, subtask coordinator, scheduler, RAG fetch/chunk/embed/vector store/search) with new API endpoints and resilience/plumbing updates.
 - Refreshed clients and tooling: VS Code extension prompt library/commands, CLI entry point, Logseq plugin scaffolding, deployment/run scripts (Ollama/Searxng), and config adjustments for providers/models.

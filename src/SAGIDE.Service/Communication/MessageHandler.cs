@@ -389,7 +389,7 @@ public class MessageHandler
         };
     }
 
-    // ── GetModels — returns configured model list + affinities from app settings ─
+    // ── GetModels — returns configured model list + affinities from appsettings ─
 
     private PipeMessage HandleGetModels(PipeMessage message)
     {
@@ -441,7 +441,7 @@ public class MessageHandler
         }
 
         // Build cloud model options — always include so users can see and select them;
-        // mark un-configured ones so users know they need to set an API key.
+        // mark unconfigured ones so users know they need to set an API key.
         var anthropicKey = _configuration["SAGIDE:ApiKeys:Anthropic"] ?? "";
         var openaiKey    = _configuration["SAGIDE:ApiKeys:OpenAI"]    ?? "";
         var googleKey    = _configuration["SAGIDE:ApiKeys:Google"]    ?? "";

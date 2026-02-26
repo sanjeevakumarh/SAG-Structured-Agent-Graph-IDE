@@ -1,12 +1,12 @@
 namespace SAGIDE.Service.Tests;
 
 /// <summary>
-/// Requirement: No environment-specific identifiers (real host names, usernames, local paths)
+/// Requirement: No environment-specific identifiers (real hostnames, usernames, local paths)
 /// should appear in any shared artifact — prompt YAMLs, docs, source code, or planning docs.
 ///
 /// All machine references in prompt YAMLs must use the logical alias names defined in
 /// appsettings.json under SAGIDE:Ollama:Servers[].Name and SAGIDE:OpenAICompatible:Servers[].Name.
-/// Real host names belong only inside appsettings.json (which is gitignored / kept private).
+/// Real hostnames belong only inside appsettings.json (which is gitignored / kept private).
 ///
 /// Approved aliases: localhost, workstation, mini, edge, orin
 /// When you add a new machine, add its alias here AND in appsettings.json — never use the real hostname elsewhere.
@@ -16,13 +16,12 @@ public class EnvironmentLeakTests
     // Logical aliases defined in appsettings.json — the ONLY names permitted in @machine notation
     private static readonly HashSet<string> ApprovedAliases =
     [
-
     ];
 
-    // Real host names / usernames that must never appear in shared files
+    // Real hostnames / usernames that must never appear in shared files
     private static readonly string[] ForbiddenPatterns =
     [
-        
+
     ];
 
     // Directories that are shared (scanned for leaks)

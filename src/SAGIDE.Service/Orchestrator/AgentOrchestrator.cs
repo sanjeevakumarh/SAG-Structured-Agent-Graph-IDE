@@ -29,6 +29,7 @@ public class AgentOrchestrator : ITaskSubmissionService
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _runningTasks = new();
     private readonly SemaphoreSlim _concurrencyLimiter;
     private readonly int _broadcastThrottleMs;
+    private readonly Infrastructure.LoggingConfig _loggingConfig;
     private CancellationTokenSource? _processingCts;
 
     /// <summary>
@@ -59,7 +60,8 @@ public class AgentOrchestrator : ITaskSubmissionService
         Infrastructure.GitConfig? gitConfig = null,
         int broadcastThrottleMs = 200,
         int maxFileSizeChars = 32_000,
-        Providers.ProviderFactory? providerFactory = null)
+        Providers.ProviderFactory? providerFactory = null,
+        Infrastructure.LoggingConfig? loggingConfig = null)
     {
         _taskQueue = taskQueue;
         _serviceProvider = serviceProvider;
@@ -81,6 +83,7 @@ public class AgentOrchestrator : ITaskSubmissionService
         _concurrencyLimiter = new SemaphoreSlim(maxConcurrentTasks, maxConcurrentTasks);
         _broadcastThrottleMs = broadcastThrottleMs;
         _maxFileSizeChars = maxFileSizeChars;
+        _loggingConfig = loggingConfig ?? new Infrastructure.LoggingConfig();
     }
 
     // R001: Idempotent — duplicate task ID returns existing, no re-execution
@@ -97,6 +100,11 @@ public class AgentOrchestrator : ITaskSubmissionService
         _logger.LogInformation(
             "Task {TaskId} queued: {AgentType} on {ModelProvider}/{ModelId}",
             taskId, task.AgentType, task.ModelProvider, task.ModelId);
+        _logger.LogDebug(
+            "Task {TaskId} description: {Description} | metadata: {Metadata}",
+            taskId,
+            _loggingConfig.SanitizeDescription(task.Description),
+            _loggingConfig.SanitizeMetadata(task.Metadata));
 
         BroadcastUpdate(task);
         await PersistTaskAsync(task);

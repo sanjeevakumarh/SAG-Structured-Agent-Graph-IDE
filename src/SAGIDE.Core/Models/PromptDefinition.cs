@@ -76,7 +76,7 @@ public class PromptDataCollectionStep
 {
     public string Name { get; set; } = string.Empty;
 
-    /// <summary>Step type: read_file | web_api | web_api_batch | filter | web_search_batch | llm_queries</summary>
+    /// <summary>Step type: read_file | web_api | web_api_batch | filter | web_search_batch | llm_queries | llm_per_section</summary>
     public string Type { get; set; } = string.Empty;
 
     /// <summary>URL or file path (may contain {{template}} expressions).</summary>
@@ -108,12 +108,32 @@ public class PromptDataCollectionStep
     public string? PlanningPrompt { get; set; }
 
     /// <summary>
-    /// Model spec for the <c>llm_queries</c> planning call
-    /// (e.g. "ollama/qwen2.5:3b@localhost").
+    /// Model spec for the planning/analysis LLM call
+    /// (e.g. "ollama/qwen2.5:14b@workstation").
     /// Falls back to <c>model_preference.orchestrator</c> when omitted.
-    /// Supports <c>{{template}}</c> expressions (e.g. "{{model_preference.subtasks.planning}}").
+    /// Supports <c>{{template}}</c> expressions (e.g. "{{model_preference.subtasks.analyst}}").
     /// </summary>
     public string? Model { get; set; }
+
+    // ── llm_per_section fields ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Per-section analysis prompt for <c>llm_per_section</c> steps.
+    /// Available template variables: <c>{{section_name}}</c>, <c>{{search_results}}</c>,
+    /// plus all regular prompt vars (topic, context, date, etc.).
+    /// </summary>
+    public string? SectionAnalysisPrompt { get; set; }
+
+    /// <summary>
+    /// Name of the var that holds search results to pass into each section analysis.
+    /// Defaults to <c>all_search_results</c>.
+    /// </summary>
+    public string? SearchResultsVar { get; set; }
+
+    /// <summary>
+    /// Maximum number of sections to generate (template or integer string). Default 5.
+    /// </summary>
+    public string? MaxSections { get; set; }
 }
 
 // ── Subtask ────────────────────────────────────────────────────────────────────

@@ -27,10 +27,10 @@ public class GitService
     public bool IsGitRepo(string workspacePath) =>
         Directory.Exists(Path.Combine(workspacePath, ".git"));
 
-    /// <summary>Cleans up any stale work trees left by a previous crash. Called on startup.</summary>
+    /// <summary>Cleans up any stale worktrees left by a previous crash. Called on startup.</summary>
     public Task PruneStaleWorktreesAsync(CancellationToken ct = default)
     {
-        // Find any work tree paths in temp that look like ours (commit logs and shadow workspaces)
+        // Find any worktree paths in temp that look like ours (commit logs and shadow workspaces)
         var tmpDir = Path.GetTempPath();
         var stale = Directory.GetDirectories(tmpDir, "sag-ide-wt-*")
             .Concat(Directory.GetDirectories(tmpDir, "sag-ide-sw-*"));
@@ -71,7 +71,7 @@ public class GitService
             // Ensure the target branch exists (race-safe via lock)
             await EnsureBranchExistsAsync(workspacePath, targetBranch, ct);
 
-            // Add work-tree pointing to the agent-log branch
+            // Add worktree pointing to the agent-log branch
             if (Directory.Exists(worktreePath))
                 Directory.Delete(worktreePath, recursive: true);
 
@@ -108,7 +108,7 @@ public class GitService
         }
         finally
         {
-            // Always remove the work-tree
+            // Always remove the worktree
             if (Directory.Exists(worktreePath))
             {
                 await RunGitAsync(workspacePath, $"worktree remove --force \"{worktreePath}\"", ct);
@@ -119,7 +119,7 @@ public class GitService
     // ── Shadow workspace methods () ─────────────────────────────────────────
 
     /// <summary>
-    /// Creates an isolated git work tree in %TEMP%/sag-ide-sw-{instanceId8} branching from
+    /// Creates an isolated git worktree in %TEMP%/sag-ide-sw-{instanceId8} branching from
     /// <paramref name="branch"/> (default HEAD). Returns the shadow path on success, or null
     /// when git is unavailable or the workspace is not a git repo.
     /// </summary>
@@ -155,7 +155,7 @@ public class GitService
     }
 
     /// <summary>
-    /// Removes the shadow work-tree, first via <c>git worktree remove --force</c> and falling
+    /// Removes the shadow worktree, first via <c>git worktree remove --force</c> and falling
     /// back to a recursive directory delete.
     /// </summary>
     public async Task DestroyShadowAsync(

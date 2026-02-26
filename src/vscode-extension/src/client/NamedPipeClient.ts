@@ -1,10 +1,11 @@
 import * as net from 'net';
 import { EventEmitter } from 'events';
-import { PipeMessage } from './MessageProtocol';
+import { PipeMessage, MessageTypes } from './MessageProtocol';
 
 export class NamedPipeClient extends EventEmitter {
     private socket: net.Socket | null = null;
     private pipeName: string;
+    private sharedSecret: string | undefined;
     private connected = false;
     private pendingRequests = new Map<string, {
         resolve: (msg: PipeMessage) => void;
@@ -15,18 +16,28 @@ export class NamedPipeClient extends EventEmitter {
     private reconnectTimer: NodeJS.Timeout | null = null;
     private requestCounter = 0;
 
-    constructor(pipeName: string = '\\\\.\\pipe\\SAGIDEPipe') {
+    constructor(pipeName: string = '\\\\.\\pipe\\SAGIDEPipe', sharedSecret?: string) {
         super();
         this.pipeName = pipeName;
+        this.sharedSecret = sharedSecret;
     }
 
     async connect(): Promise<void> {
+        // Phase 1: establish the OS-level pipe connection.
+        await this.connectSocket();
+        // Phase 2: if a shared secret is configured, prove identity before normal use.
+        if (this.sharedSecret) {
+            await this.authenticate();
+        }
+        this.emit('connected');
+    }
+
+    private connectSocket(): Promise<void> {
         return new Promise((resolve, reject) => {
             this.socket = net.createConnection(this.pipeName);
 
-            this.socket.on('connect', () => {
+            this.socket.once('connect', () => {
                 this.connected = true;
-                this.emit('connected');
                 resolve();
             });
 
@@ -48,6 +59,17 @@ export class NamedPipeClient extends EventEmitter {
                 }
             });
         });
+    }
+
+    private async authenticate(): Promise<void> {
+        const response = await this.send(
+            { type: MessageTypes.PipeAuth, payload: Buffer.from(this.sharedSecret!, 'utf-8') },
+            5_000
+        );
+        if (response.type !== MessageTypes.PipeAuthOk) {
+            await this.disconnect();
+            throw new Error('Pipe authentication failed: server rejected the shared secret');
+        }
     }
 
     async send(message: PipeMessage, timeoutMs = 7_200_000): Promise<PipeMessage> {

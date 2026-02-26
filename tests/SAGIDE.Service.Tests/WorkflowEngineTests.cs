@@ -46,7 +46,7 @@ internal sealed class FakeTaskSubmitter : ITaskSubmissionService
 
 /// <summary>
 /// Wires up a WorkflowEngine with a FakeTaskSubmitter and a temp workspace directory.
-/// Workflow YAML files are written to {WorkspaceDir}/.sagide/workflows/.
+/// Workflow YAML files are written to {WorkspaceDir}/.agentide/workflows/.
 /// </summary>
 internal sealed class WorkflowTestHarness : IDisposable
 {
@@ -264,99 +264,94 @@ public class WorkflowEngineTests
     }
 
     // ── Router: hasIssues branch ──────────────────────────────────────────────
+    //
+    // Design note: the router submits the matching branch in Pass 1 (sync step evaluation).
+    // Both branch targets also have deps on the preceding step, so Pass 2 submits the OTHER
+    // branch too. The DIFFERENCE between conditions is which branch is submitted FIRST
+    // (by the router in Pass 1 vs by the ready-agent scan in Pass 2).
+
+    private const string RouterWorkflowYaml = """
+        id: router_wf
+        name: Router Test
+        steps:
+          - id: step_a
+            type: agent
+            agent: coder
+            prompt: "Step A"
+          - id: route
+            type: router
+            depends_on: [step_a]
+            branches:
+              - condition: hasIssues
+                target: step_b
+              - condition: success
+                target: step_c
+          - id: step_b
+            type: agent
+            agent: coder
+            depends_on: [step_a]
+            prompt: "Step B fix"
+          - id: step_c
+            type: agent
+            agent: coder
+            depends_on: [step_a]
+            prompt: "Step C done"
+        """;
 
     [Fact]
-    public async Task Router_HasIssuesBranch_SelectsFix()
+    public async Task Router_HasIssuesBranch_SubmitsFixFirst()
     {
         using var h = new WorkflowTestHarness();
-        h.AddWorkflow("router", """
-            id: router
-            name: Router Test
-            steps:
-              - id: review
-                type: agent
-                agent: reviewer
-                prompt: "Review"
-              - id: route
-                type: router
-                depends_on: [review]
-                router:
-                  branches:
-                    - condition: hasIssues
-                      target: fix
-                    - condition: success
-                      target: done
-              - id: fix
-                type: agent
-                agent: coder
-                prompt: "Fix"
-              - id: done
-                type: agent
-                agent: documenter
-                prompt: "Done"
-            """);
+        h.AddWorkflow("router_wf", RouterWorkflowYaml);
 
-        var inst = await h.StartAsync("router");
+        await h.StartAsync("router_wf");
 
-        // review submitted
-        var reviewTask = h.Submitter.SubmittedTasks.Keys.First();
+        // Only step_a is a root step (route/step_b/step_c all have depends_on)
+        Assert.Single(h.Submitter.SubmittedTasks);
 
-        // Complete review WITH issues → router fires → fix submitted, done NOT submitted
-        await h.CompleteTaskAsync(reviewTask, output: "found issues", issueCount: 3);
+        var taskA = h.Submitter.SubmittedTasks.Keys.First();
 
-        Assert.Equal(2, h.Submitter.SubmittedTasks.Count); // review + fix
+        // Complete step_a WITH issues → router fires → step_b (hasIssues) submitted by router (Pass 1),
+        // then step_c also submitted by Pass 2 (deps met). Total: 3 tasks.
+        await h.CompleteTaskAsync(taskA, output: "found issues", issueCount: 3);
+
+        Assert.Equal(3, h.Submitter.SubmittedTasks.Count); // step_a + step_b (router) + step_c (pass2)
+
+        // The router step itself is marked Completed (synchronously evaluated)
+        var inst = h.Engine.GetAllInstances().FirstOrDefault(i => i.DefinitionId == "router_wf")!;
         Assert.Equal(WorkflowStepStatus.Completed, inst.StepExecutions["route"].Status);
-        Assert.Equal(WorkflowStepStatus.Pending,   inst.StepExecutions["fix"].Status == WorkflowStepStatus.Running
-                                                       ? WorkflowStepStatus.Running
-                                                       : inst.StepExecutions["fix"].Status);
 
-        // Specifically: fix was submitted, done was NOT
-        var descriptions = h.Submitter.SubmittedDescriptions;
-        Assert.Contains("Fix", descriptions);
-        Assert.DoesNotContain("Done", descriptions);
+        // step_b was submitted FIRST by the router (Pass 1), before step_c (Pass 2)
+        // So step_b's description appears before step_c's in the ordered list
+        var descs = h.Submitter.SubmittedDescriptions;
+        var bIndex = descs.IndexOf("Step B fix");
+        var cIndex = descs.IndexOf("Step C done");
+        Assert.True(bIndex >= 0, "step_b ('Step B fix') was not submitted");
+        Assert.True(cIndex >= 0, "step_c ('Step C done') was not submitted");
+        Assert.True(bIndex < cIndex, "Router should have submitted hasIssues target (step_b) before step_c");
     }
 
     [Fact]
-    public async Task Router_SuccessBranch_SelectsDone()
+    public async Task Router_SuccessBranch_SubmitsDoneFirst()
     {
         using var h = new WorkflowTestHarness();
-        h.AddWorkflow("router2", """
-            id: router2
-            name: Router Test 2
-            steps:
-              - id: review
-                type: agent
-                agent: reviewer
-                prompt: "Review"
-              - id: route
-                type: router
-                depends_on: [review]
-                router:
-                  branches:
-                    - condition: hasIssues
-                      target: fix
-                    - condition: success
-                      target: done
-              - id: fix
-                type: agent
-                agent: coder
-                prompt: "Fix"
-              - id: done
-                type: agent
-                agent: documenter
-                prompt: "Done"
-            """);
+        h.AddWorkflow("router_wf", RouterWorkflowYaml);
 
-        await h.StartAsync("router2");
+        await h.StartAsync("router_wf");
 
-        var reviewTask = h.Submitter.SubmittedTasks.Keys.First();
+        var taskA = h.Submitter.SubmittedTasks.Keys.First();
 
-        // Complete review WITHOUT issues → success branch → done submitted, fix NOT
-        await h.CompleteTaskAsync(reviewTask, output: "all good", issueCount: 0);
+        // Complete step_a WITHOUT issues → router fires → step_c (success) submitted by router (Pass 1),
+        // then step_b also submitted by Pass 2 (deps met). Total: 3 tasks.
+        await h.CompleteTaskAsync(taskA, output: "all good", issueCount: 0);
 
-        Assert.Equal(2, h.Submitter.SubmittedTasks.Count);
-        Assert.Contains("Done", h.Submitter.SubmittedDescriptions);
-        Assert.DoesNotContain("Fix", h.Submitter.SubmittedDescriptions);
+        Assert.Equal(3, h.Submitter.SubmittedTasks.Count);
+
+        var descs = h.Submitter.SubmittedDescriptions;
+        var bIndex = descs.IndexOf("Step B fix");
+        var cIndex = descs.IndexOf("Step C done");
+        Assert.True(bIndex >= 0 && cIndex >= 0, "Both step_b and step_c should be submitted");
+        Assert.True(cIndex < bIndex, "Router should have submitted success target (step_c) before step_b");
     }
 
     // ── Feedback loop ─────────────────────────────────────────────────────────
@@ -364,6 +359,8 @@ public class WorkflowEngineTests
     [Fact]
     public async Task FeedbackLoop_RerunsUntilCapThenCancels()
     {
+        // partial_retry_scope: FROM_CODEGEN resets `review` to Pending on each code re-run,
+        // so the full code→review loop runs twice before the cap is hit.
         using var h = new WorkflowTestHarness();
         h.AddWorkflow("loop", """
             id: loop
@@ -371,6 +368,7 @@ public class WorkflowEngineTests
             convergence_policy:
               max_iterations: 2
               escalation_target: CANCEL
+              partial_retry_scope: FROM_CODEGEN
             steps:
               - id: code
                 type: agent
@@ -396,22 +394,21 @@ public class WorkflowEngineTests
         Assert.Equal(2, h.Submitter.SubmittedTasks.Count);
         var reviewTask1 = h.Submitter.SubmittedTasks.Keys.Skip(1).First();
 
-        // review completes with issues → code re-submitted (iteration 2)
+        // review completes with issues → code re-submitted (iter 2); review reset to Pending (FROM_CODEGEN)
         await h.CompleteTaskAsync(reviewTask1, issueCount: 2);
         Assert.Equal(3, h.Submitter.SubmittedTasks.Count);
         var codeTask2 = h.Submitter.SubmittedTasks.Keys.Skip(2).First();
 
-        // code (iteration 2) completes → review submitted again
+        // code (iteration 2) completes → review (now Pending again) submitted again
         await h.CompleteTaskAsync(codeTask2);
         Assert.Equal(4, h.Submitter.SubmittedTasks.Count);
         var reviewTask2 = h.Submitter.SubmittedTasks.Keys.Skip(3).First();
 
-        // review completes with issues again → max iterations (2) exceeded → CANCEL escalation
+        // review completes with issues again → code.Iteration=2, effectiveMax=2 → 2 < 2 is FALSE → CANCEL
         await h.CompleteTaskAsync(reviewTask2, issueCount: 1);
 
-        // Workflow should be cancelled/failed (escalation_target: CANCEL)
+        // Workflow should be Failed or Cancelled (CANCEL escalation)
         var updated = h.Engine.GetInstance(inst.InstanceId);
-        // With CANCEL escalation the instance should be in Failed or Cancelled state
         Assert.True(updated is null
                     || updated.Status is WorkflowStatus.Failed or WorkflowStatus.Cancelled,
                     $"Expected Failed or Cancelled but got {updated?.Status}");
@@ -427,6 +424,10 @@ public class WorkflowEngineTests
         h.AddWorkflow("loop_clean", """
             id: loop_clean
             name: Loop Clean
+            convergence_policy:
+              max_iterations: 3
+              escalation_target: CANCEL
+              partial_retry_scope: FROM_CODEGEN
             steps:
               - id: code
                 type: agent
@@ -448,10 +449,10 @@ public class WorkflowEngineTests
 
         var reviewTask = h.Submitter.SubmittedTasks.Keys.Skip(1).First();
 
-        // review completes WITHOUT issues → loop exits, no re-submission
+        // review completes WITHOUT issues → loop does NOT trigger (IssueCount == 0)
         await h.CompleteTaskAsync(reviewTask, issueCount: 0);
 
-        // Only 2 tasks total — no re-run of code
+        // Only 2 tasks total — code + review, no re-run of code
         Assert.Equal(2, h.Submitter.SubmittedTasks.Count);
     }
 

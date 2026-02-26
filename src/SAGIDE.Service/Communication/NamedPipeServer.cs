@@ -1,5 +1,7 @@
 using System.IO.Pipes;
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
@@ -25,7 +27,7 @@ public class NamedPipeServer
 
     /// <summary>
     /// Total number of broadcast messages silently dropped due to a full channel (DropOldest policy).
-    /// Non-zero values indicate the service is under back-pressure. Exposed via /api/health.
+    /// Non-zero values indicate the service is under backpressure. Exposed via /api/health.
     /// </summary>
     public long DroppedMessageCount => Interlocked.Read(ref _droppedMessageCount);
     private long _droppedMessageCount;
@@ -76,13 +78,7 @@ public class NamedPipeServer
         {
             try
             {
-                var server = new NamedPipeServerStream(
-                    _pipeName,
-                    PipeDirection.InOut,
-                    NamedPipeServerStream.MaxAllowedServerInstances,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
-
+                var server = CreatePipeServer();
                 await server.WaitForConnectionAsync(ct);
                 consecutiveErrors = 0; // reset on successful accept
                 var clientId = Guid.NewGuid().ToString("N")[..8];
@@ -109,6 +105,105 @@ public class NamedPipeServer
                     consecutiveErrors, delayMs);
                 await Task.Delay(delayMs, ct);
             }
+        }
+    }
+
+    // ── Pipe creation ─────────────────────────────────────────────────────────
+
+    private NamedPipeServerStream CreatePipeServer()
+    {
+        if (_config.EnablePipeSecurity && OperatingSystem.IsWindows())
+            return CreateSecurePipeServer();
+
+        return new NamedPipeServerStream(
+            _pipeName, PipeDirection.InOut,
+            NamedPipeServerStream.MaxAllowedServerInstances,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private NamedPipeServerStream CreateSecurePipeServer()
+    {
+        using var identity = System.Security.Principal.WindowsIdentity.GetCurrent();
+        // Use .User (the actual user SID), not .Owner (which on elevated sessions is
+        // the Administrators group SID and cannot create pipe instances).
+        var sid = identity.User
+            ?? throw new InvalidOperationException("Cannot determine current Windows user SID for pipe ACL");
+
+        var security = new PipeSecurity();
+        // FullControl is required for the pipe creator; ReadWrite alone is not sufficient
+        // to create new instances and causes UnauthorizedAccessException.
+        security.AddAccessRule(new PipeAccessRule(
+            sid,
+            PipeAccessRights.FullControl,
+            System.Security.AccessControl.AccessControlType.Allow));
+
+        return NamedPipeServerStreamAcl.Create(
+            _pipeName, PipeDirection.InOut,
+            NamedPipeServerStream.MaxAllowedServerInstances,
+            PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
+            inBufferSize: 0, outBufferSize: 0, security);
+    }
+
+    // ── Shared-secret handshake ───────────────────────────────────────────────
+
+    /// <summary>
+    /// If a SharedSecret is configured, reads the first frame from the client and
+    /// verifies it is a pipe_auth message whose payload matches the secret (constant-time
+    /// comparison). Sends pipe_auth_ok on success; returns false (caller closes) on failure.
+    /// If no secret is configured the method returns true immediately.
+    /// </summary>
+    private async Task<bool> PerformHandshakeAsync(string clientId, ClientEntry entry, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(_config.SharedSecret))
+            return true;
+
+        using var timeoutCts = new CancellationTokenSource(
+            TimeSpan.FromMilliseconds(_config.HandshakeTimeoutMs));
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
+        try
+        {
+            var lengthBuffer = new byte[4];
+            if (!await ReadExactAsync(entry.Stream, lengthBuffer, 4, linked.Token))
+                return false;
+
+            var len = BitConverter.ToInt32(lengthBuffer, 0);
+            if (len <= 0 || len > _config.MaxMessageSizeBytes)
+                return false;
+
+            var msgBuffer = new byte[len];
+            if (!await ReadExactAsync(entry.Stream, msgBuffer, len, linked.Token))
+                return false;
+
+            PipeMessage? msg;
+            try { msg = JsonSerializer.Deserialize<PipeMessage>(msgBuffer, JsonOptions); }
+            catch { return false; }
+
+            if (msg?.Type != MessageTypes.PipeAuth)
+                return false;
+
+            var provided = msg.Payload != null ? Encoding.UTF8.GetString(msg.Payload) : string.Empty;
+            var expected = _config.SharedSecret;
+
+            // Constant-time comparison prevents timing side-channel attacks.
+            if (!CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(provided),
+                    Encoding.UTF8.GetBytes(expected)))
+            {
+                _logger.LogWarning("Client {ClientId} supplied wrong pipe secret", clientId);
+                return false;
+            }
+
+            await SendWithLockAsync(entry,
+                new PipeMessage { Type = MessageTypes.PipeAuthOk, RequestId = msg.RequestId }, ct);
+            return true;
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning("Client {ClientId} did not complete handshake within {Ms}ms",
+                clientId, _config.HandshakeTimeoutMs);
+            return false;
         }
     }
 
@@ -152,6 +247,13 @@ public class NamedPipeServer
         var stream = entry.Stream;
         try
         {
+            // Shared-secret handshake must succeed before any real messages are processed.
+            if (!await PerformHandshakeAsync(clientId, entry, ct))
+            {
+                _logger.LogWarning("Client {ClientId} failed pipe authentication; closing", clientId);
+                return;
+            }
+
             var lengthBuffer = new byte[4];
             while (stream.IsConnected && !ct.IsCancellationRequested)
             {

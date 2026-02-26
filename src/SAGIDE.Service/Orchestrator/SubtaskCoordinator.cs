@@ -1,7 +1,5 @@
 using System.Text;
 using System.Text.Json;
-using Scriban;
-using Scriban.Runtime;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.Models;
@@ -294,7 +292,7 @@ public sealed class SubtaskCoordinator
                 var modelSpecRaw = string.IsNullOrWhiteSpace(step.Model)
                     ? (prompt.ModelPreference?.Orchestrator ?? string.Empty)
                     : step.Model;
-                var modelSpec = ResolveModelTemplate(modelSpecRaw, vars);
+                var modelSpec = ResolveSimpleTemplate(modelSpecRaw, vars);
                 var (planProvider, planModelId, planEndpoint) = ParseModelSpec(modelSpec);
 
                 // Submit planning task to the LLM
@@ -352,6 +350,108 @@ public sealed class SubtaskCoordinator
                 }
 
                 return string.Join("\n\n---\n\n", sections);
+            }
+
+            case "llm_per_section":
+            {
+                if (string.IsNullOrWhiteSpace(step.PlanningPrompt))
+                {
+                    _logger.LogWarning("llm_per_section step '{Name}': no planning_prompt — skipped", step.Name);
+                    return string.Empty;
+                }
+
+                // ── Phase 1: ask LLM which sections to write ──────────────────
+                var planText  = ResolveSimpleTemplate(step.PlanningPrompt, vars);
+                var modelSpecRaw = string.IsNullOrWhiteSpace(step.Model)
+                    ? (prompt.ModelPreference?.Orchestrator ?? string.Empty)
+                    : step.Model;
+                var modelSpec = ResolveSimpleTemplate(modelSpecRaw, vars);
+                var (secProvider, secModelId, secEndpoint) = ParseModelSpec(modelSpec);
+
+                var planTask = new AgentTask
+                {
+                    AgentType     = AgentType.Generic,
+                    ModelProvider = secProvider,
+                    ModelId       = secModelId,
+                    Description   = planText,
+                    SourceTag     = prompt.SourceTag ?? $"{prompt.Domain}_section_plan",
+                    Priority      = 1,
+                    Metadata      = new Dictionary<string, string>
+                    {
+                        ["step_name"] = step.Name, ["step_type"] = "llm_per_section_plan",
+                        ["prompt_domain"] = prompt.Domain, ["prompt_name"] = prompt.Name,
+                    },
+                };
+                if (!string.IsNullOrEmpty(secEndpoint)) planTask.Metadata["modelEndpoint"] = secEndpoint;
+
+                var planTaskId = await _orchestrator.SubmitTaskAsync(planTask, ct);
+                var planResult = await WaitForTaskAsync(planTaskId, ct);
+                var sectionNames = ParseJsonStringArray(planResult);
+
+                var maxSectionsStr = ResolveSimpleTemplate(step.MaxSections ?? "5", vars);
+                var maxSections = int.TryParse(maxSectionsStr, out var ms) && ms > 0 ? ms : 5;
+                sectionNames = sectionNames.Take(maxSections).ToList();
+
+                if (sectionNames.Count == 0)
+                {
+                    _logger.LogWarning("llm_per_section '{Name}': LLM returned no section names. Raw: {Raw}",
+                        step.Name, planResult.Length > 300 ? planResult[..300] + "..." : planResult);
+                    return string.Empty;
+                }
+
+                _logger.LogInformation("llm_per_section '{Name}': {Count} sections — {List}",
+                    step.Name, sectionNames.Count, string.Join(" | ", sectionNames));
+
+                if (string.IsNullOrWhiteSpace(step.SectionAnalysisPrompt))
+                {
+                    _logger.LogWarning("llm_per_section '{Name}': no section_analysis_prompt — returning headings only", step.Name);
+                    return string.Join("\n\n", sectionNames.Select(s => $"## {s}"));
+                }
+
+                // ── Phase 2: dispatch all section analysis tasks in parallel ──
+                var searchData = vars.TryGetValue(step.SearchResultsVar ?? "all_search_results", out var sr)
+                    ? sr?.ToString() ?? string.Empty : string.Empty;
+
+                var sectionTasks = sectionNames.Select(async sectionName =>
+                {
+                    var sectionVars = new Dictionary<string, object>(vars, StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["section_name"]   = sectionName,
+                        ["search_results"] = searchData,
+                    };
+                    var sectionPromptText = ResolveSimpleTemplate(step.SectionAnalysisPrompt, sectionVars);
+
+                    var sTask = new AgentTask
+                    {
+                        AgentType     = AgentType.Generic,
+                        ModelProvider = secProvider,
+                        ModelId       = secModelId,
+                        Description   = sectionPromptText,
+                        SourceTag     = prompt.SourceTag ?? $"{prompt.Domain}_section_analysis",
+                        Priority      = 1,
+                        Metadata      = new Dictionary<string, string>
+                        {
+                            ["step_name"]    = step.Name, ["step_type"] = "llm_per_section_analysis",
+                            ["section_name"] = sectionName,
+                            ["prompt_domain"] = prompt.Domain, ["prompt_name"] = prompt.Name,
+                        },
+                    };
+                    if (!string.IsNullOrEmpty(secEndpoint)) sTask.Metadata["modelEndpoint"] = secEndpoint;
+
+                    var sTaskId = await _orchestrator.SubmitTaskAsync(sTask, ct);
+                    _logger.LogDebug("llm_per_section '{Name}': section '{Section}' → task {TaskId}",
+                        step.Name, sectionName, sTaskId);
+                    var result = await WaitForTaskAsync(sTaskId, ct);
+                    return (sectionName, result);
+                });
+
+                var sectionResults = await Task.WhenAll(sectionTasks);
+
+                // Reassemble in planning order; skip empty results
+                return string.Join("\n\n", sectionNames
+                    .Select(name => sectionResults.FirstOrDefault(r => r.sectionName == name))
+                    .Where(r => !string.IsNullOrWhiteSpace(r.result))
+                    .Select(r => $"## {r.sectionName}\n\n{r.result.Trim()}"));
             }
 
             default:
@@ -483,7 +583,7 @@ public sealed class SubtaskCoordinator
         try
         {
             // Resolve model spec — may be a Scriban template
-            var modelSpec = ResolveModelTemplate(subtask.Model ?? string.Empty, vars);
+            var modelSpec = ResolveSimpleTemplate(subtask.Model ?? string.Empty, vars);
             var (provider, modelId, parsedEndpoint) = ParseModelSpec(modelSpec);
 
             // Use override if provided (retry path); otherwise start with the parsed endpoint
@@ -732,43 +832,13 @@ public sealed class SubtaskCoordinator
     /// <c>{{model_preference.subtasks.fundamental}}</c>.
     /// Falls back to the original string on render failure.
     /// </summary>
-    private static string ResolveModelTemplate(string template, Dictionary<string, object> vars)
-    {
-        if (!template.Contains("{{")) return template;
-
-        try
-        {
-            var t   = Template.Parse(template);
-            var ctx = new TemplateContext { MemberRenamer = m => m.Name };
-            var g   = new ScriptObject();
-            foreach (var kv in vars)
-                g[kv.Key] = kv.Value;
-            ctx.PushGlobal(g);
-            return t.Render(ctx) ?? template;
-        }
-        catch
-        {
-            return template;
-        }
-    }
-
     /// <summary>
-    /// Simple {{varName}} → value substitution using string.Replace.
-    /// Does not handle nested paths. Suitable for resolving step source/query parameters.
+    /// Renders a template string with Scriban. Handles both simple {{key}} substitutions and
+    /// nested paths like {{model_preference.subtasks.planning}}.
+    /// On parse or render error the original template is returned unchanged.
     /// </summary>
-    private static string ResolveSimpleTemplate(string template, Dictionary<string, object> vars)
-    {
-        if (!template.Contains("{{")) return template;
-
-        foreach (var kv in vars)
-        {
-            var placeholder = $"{{{{{kv.Key}}}}}";
-            if (template.Contains(placeholder, StringComparison.OrdinalIgnoreCase))
-                template = template.Replace(placeholder, kv.Value?.ToString() ?? string.Empty,
-                    StringComparison.OrdinalIgnoreCase);
-        }
-        return template;
-    }
+    private static string ResolveSimpleTemplate(string template, Dictionary<string, object> vars) =>
+        PromptTemplate.RenderRaw(template, vars);
 
     /// <summary>
     /// Resolves an expression like "{{watchlist.symbols}}" into its var name ("watchlist"),

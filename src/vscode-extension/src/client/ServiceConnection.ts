@@ -35,12 +35,12 @@ export class ServiceConnection implements vscode.Disposable {
     private _onApprovalNeeded = new vscode.EventEmitter<WorkflowApprovalNeededPayload>();
     public readonly onApprovalNeeded = this._onApprovalNeeded.event;
 
-    constructor(pipeName: string) {
+    constructor(pipeName: string, sharedSecret?: string) {
         const fullPipeName = process.platform === 'win32'
             ? `\\\\.\\pipe\\${pipeName}`
             : `/tmp/${pipeName}`;
 
-        this.client = new NamedPipeClient(fullPipeName);
+        this.client = new NamedPipeClient(fullPipeName, sharedSecret);
         this.statusBarItem = vscode.window.createStatusBarItem(
             vscode.StatusBarAlignment.Left, 100
         );

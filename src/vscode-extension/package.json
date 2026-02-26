@@ -398,6 +398,11 @@
           "default": "SAGIDEPipe",
           "description": "Named pipe name for service communication"
         },
+        "sagIDE.pipeSharedSecret": {
+          "type": "string",
+          "default": "",
+          "description": "Optional shared secret for named-pipe authentication. Must match SAGIDE:Communication:SharedSecret in the service appsettings.json. Leave empty to disable the handshake (PipeSecurity ACL still applies on Windows)."
+        },
         "sagIDE.overnightTime": {
           "type": "string",
           "default": "23:00",

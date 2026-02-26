@@ -1,4 +1,7 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading.RateLimiting;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Serilog;
@@ -25,7 +28,7 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
-    Log.Information("Starting Agentic IDE Service");
+    Log.Information("Starting SAGIDE Service");
 
     var builder = WebApplication.CreateBuilder(args);
 
@@ -35,6 +38,37 @@ try
     // Read config
     var pipeName      = builder.Configuration["SAGIDE:NamedPipeName"] ?? "SAGIDEPipe";
     var maxConcurrent = builder.Configuration.GetValue("SAGIDE:MaxConcurrentAgents", 5);
+
+    // ── REST API security ──────────────────────────────────────────────────────
+    // Default to loopback-only if no Kestrel endpoint is configured in appsettings.
+    // appsettings.Template.json already sets 127.0.0.1; this is a defence-in-depth fallback.
+    if (string.IsNullOrEmpty(builder.Configuration["Kestrel:Endpoints:Http:Url"]))
+        builder.WebHost.UseUrls("http://127.0.0.1:5100");
+
+    var restBearerToken    = builder.Configuration["SAGIDE:RestApi:BearerToken"];
+    var rateLimitPerMinute = builder.Configuration.GetValue("SAGIDE:RestApi:RateLimitPerMinute", 300);
+
+    // Per-IP fixed-window rate limiter — applies to all endpoint-routed requests (/api/* and /dashboard).
+    // Static files served by UseStaticFiles() short-circuit before endpoint routing and are not affected.
+    builder.Services.AddRateLimiter(options =>
+    {
+        options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx =>
+            RateLimitPartition.GetFixedWindowLimiter(
+                ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                _ => new FixedWindowRateLimiterOptions
+                {
+                    PermitLimit          = rateLimitPerMinute,
+                    Window               = TimeSpan.FromMinutes(1),
+                    QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+                    QueueLimit           = 0,
+                }));
+        options.RejectionStatusCode = 429;
+    });
+
+    // Logging configuration — controls what task data appears in log output.
+    var loggingConfig = new SAGIDE.Service.Infrastructure.LoggingConfig();
+    builder.Configuration.GetSection("SAGIDE:Logging").Bind(loggingConfig);
+    builder.Services.AddSingleton(loggingConfig);
 
     // Bind resilience configs from appsettings.
     // timeoutConfig is kept as a local variable because it is also passed directly to ProviderFactory
@@ -118,7 +152,7 @@ try
     var maxTaskHistory      = builder.Configuration.GetValue("SAGIDE:Orchestration:MaxTaskHistoryInMemory", 1000);
     var broadcastThrottleMs = builder.Configuration.GetValue("SAGIDE:Orchestration:BroadcastThrottleMs", 200);
     var maxFileSizeChars    = builder.Configuration.GetValue("SAGIDE:Orchestration:MaxFileSizeChars", 32_000);
-    PromptTemplateEngine.Configure(
+    PromptTemplate.Configure(
         builder.Configuration.GetValue("SAGIDE:Orchestration:MaxStepOutputChars", 4000));
     builder.Services.AddSingleton(new TaskQueue(maxTaskHistory));
     // Register AgentOrchestrator as both its concrete type and the ITaskSubmissionService interface.
@@ -139,7 +173,8 @@ try
         sp.GetRequiredService<GitConfig>(),
         broadcastThrottleMs,
         maxFileSizeChars,
-        sp.GetRequiredService<ProviderFactory>()));
+        sp.GetRequiredService<ProviderFactory>(),
+        sp.GetRequiredService<SAGIDE.Service.Infrastructure.LoggingConfig>()));
     builder.Services.AddSingleton<ITaskSubmissionService>(sp => sp.GetRequiredService<AgentOrchestrator>());
 
     // Register workflow engine with all dependencies (Items 1, 3, 4, 6)
@@ -196,9 +231,35 @@ try
 
     var app = builder.Build();
 
-    // Web dashboard — serve wwwroot/index.html at /dashboard and root /
+    // Serve static dashboard — UseStaticFiles short-circuits before endpoint routing,
+    // so these responses bypass the rate limiter and bearer-token guard below.
     app.UseDefaultFiles();
     app.UseStaticFiles();
+
+    // Rate limiting — per-IP fixed window; applies to all endpoint-routed requests.
+    app.UseRateLimiter();
+
+    // Bearer-token guard — only active when SAGIDE:RestApi:BearerToken is set.
+    // Applies to /api/* paths only; uses constant-time comparison to prevent timing attacks.
+    if (!string.IsNullOrEmpty(restBearerToken))
+    {
+        var expectedBytes = Encoding.UTF8.GetBytes($"Bearer {restBearerToken}");
+        app.Use(async (ctx, next) =>
+        {
+            if (ctx.Request.Path.StartsWithSegments("/api"))
+            {
+                var header      = ctx.Request.Headers.Authorization.FirstOrDefault() ?? string.Empty;
+                var headerBytes = Encoding.UTF8.GetBytes(header);
+                if (!CryptographicOperations.FixedTimeEquals(headerBytes, expectedBytes))
+                {
+                    ctx.Response.StatusCode = 401;
+                    ctx.Response.Headers.WWWAuthenticate = "Bearer realm=\"SAGIDE\"";
+                    return;
+                }
+            }
+            await next();
+        });
+    }
 
     // REST API endpoints
     app.MapTaskEndpoints();

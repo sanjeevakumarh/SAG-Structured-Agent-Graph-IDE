@@ -18,6 +18,12 @@ export class Configuration {
         return this.config.get<string>('pipeName', 'SAGIDEPipe');
     }
 
+    /** Returns the shared secret for the pipe handshake, or undefined if not configured. */
+    static get pipeSharedSecret(): string | undefined {
+        const secret = this.config.get<string>('pipeSharedSecret', '');
+        return secret || undefined;
+    }
+
     static getModelForAgent(agentType: AgentType): ModelProvider {
         const key = agentType.charAt(0).toLowerCase() + agentType.slice(1);
         return this.config.get<ModelProvider>(`models.${key}`, this.defaultModel);

@@ -57,4 +57,10 @@ public static class MessageTypes
 
     /// <summary>Client → server: request the configured model list and task affinities.</summary>
     public const string GetModels = "get_models";
+
+    // ── Pipe authentication ───────────────────────────────────────────────────
+    /// <summary>Client → server: shared-secret handshake (payload = UTF-8 secret).</summary>
+    public const string PipeAuth   = "pipe_auth";
+    /// <summary>Server → client: handshake accepted; normal messages may now be sent.</summary>
+    public const string PipeAuthOk = "pipe_auth_ok";
 }

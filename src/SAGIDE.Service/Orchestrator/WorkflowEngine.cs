@@ -6,6 +6,7 @@ using SAGIDE.Core.DTOs;
 using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Infrastructure;
+using SAGIDE.Service.Prompts;
 using SAGIDE.Service.Resilience;
 
 namespace SAGIDE.Service.Orchestrator;
@@ -764,7 +765,7 @@ public class WorkflowEngine
         {
             var stepExec = inst.StepExecutions[approvalStep.Id];
             var prompt   = approvalStep.ApprovalPrompt is not null
-                ? PromptTemplateEngine.Resolve(approvalStep.ApprovalPrompt, inst.InputContext, inst.StepExecutions)
+                ? PromptTemplate.RenderWorkflowStep(approvalStep.ApprovalPrompt, inst.InputContext, inst.StepExecutions, PromptTemplate.MaxOutputChars)
                 : $"Please review the workflow '{inst.DefinitionName}' and approve or reject step '{approvalStep.Id}'.";
 
             stepExec.StartedAt = DateTime.UtcNow;
@@ -831,7 +832,7 @@ public class WorkflowEngine
 
         // Resolve prompt template
         var basePrompt    = stepDef.Prompt ?? $"Process the following with a {stepDef.Agent ?? stepDef.Id} agent.";
-        var resolvedPrompt = PromptTemplateEngine.Resolve(basePrompt, inst.InputContext, inst.StepExecutions);
+        var resolvedPrompt = PromptTemplate.RenderWorkflowStep(basePrompt, inst.InputContext, inst.StepExecutions, PromptTemplate.MaxOutputChars);
 
         // Model resolution chain:
         //   1. YAML-baked step model (author explicit override — highest priority)
@@ -1318,7 +1319,7 @@ public class WorkflowEngine
             return (false, $"Step '{stepId}' not found.");
         }
 
-        return (false, $"Unrecognized constraint expression: '{expr}'");
+        return (false, $"Unrecognised constraint expression: '{expr}'");
     }
 
     private static bool CompareInts(int actual, string op, int expected) => op switch
@@ -1364,11 +1365,11 @@ public class WorkflowEngine
 
         // Capture state needed by the background task
         var instanceId = inst.InstanceId;
-        var command    = PromptTemplateEngine.Resolve(
-            stepDef.Command ?? "", inst.InputContext, inst.StepExecutions);
+        var command    = PromptTemplate.RenderWorkflowStep(
+            stepDef.Command ?? "", inst.InputContext, inst.StepExecutions, PromptTemplate.MaxOutputChars);
         var workingDir = string.IsNullOrWhiteSpace(stepDef.WorkingDir)
             ? inst.WorkspacePath ?? Directory.GetCurrentDirectory()
-            : PromptTemplateEngine.Resolve(stepDef.WorkingDir, inst.InputContext, inst.StepExecutions);
+            : PromptTemplate.RenderWorkflowStep(stepDef.WorkingDir, inst.InputContext, inst.StepExecutions, PromptTemplate.MaxOutputChars);
         var policy     = stepDef.ExitCodePolicy.ToUpperInvariant();
         var timeoutSec = stepDef.TimeoutSec;
 

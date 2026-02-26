@@ -10,7 +10,7 @@ internal static class TaskEndpoints
 {
     internal static IEndpointRouteBuilder MapTaskEndpoints(this IEndpointRouteBuilder app)
     {
-        // GET /api/health — liveness + readiness check (DB connectivity + IPC back-pressure)
+        // GET /api/health — liveness + readiness check (DB connectivity + IPC backpressure)
         app.MapGet("/api/health", async (ITaskRepository repository, NamedPipeServer pipeServer, CancellationToken ct) =>
         {
             var dbOk        = await repository.CheckHealthAsync(ct);

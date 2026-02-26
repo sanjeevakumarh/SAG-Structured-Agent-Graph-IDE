@@ -44,7 +44,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // Create service connection (assigned to module-level var for deactivate())
     const pipeName = Configuration.pipeName;
-    connection = new ServiceConnection(pipeName);
+    const pipeSecret = Configuration.pipeSharedSecret;
+    connection = new ServiceConnection(pipeName, pipeSecret);
     context.subscriptions.push(connection);
 
     // Comparison group tracker — watches for all tasks in a group to finish

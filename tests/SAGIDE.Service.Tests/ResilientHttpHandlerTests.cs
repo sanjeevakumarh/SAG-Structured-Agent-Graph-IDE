@@ -21,20 +21,21 @@ public class ResilientHttpHandlerTests
 
     private sealed class FakeHandler : HttpMessageHandler
     {
-        private readonly Queue<Func<HttpResponseMessage>> _queue = new();
+        private readonly Queue<Func<CancellationToken, Task<HttpResponseMessage>>> _queue = new();
 
-        public void Enqueue(HttpResponseMessage r) => _queue.Enqueue(() => r);
+        public void Enqueue(HttpResponseMessage r)
+            => _queue.Enqueue(_ => Task.FromResult(r));
         public void EnqueueDelay(int ms, HttpResponseMessage r)
-            => _queue.Enqueue(() => { Task.Delay(ms).Wait(); return r; });
+            => _queue.Enqueue(async ct => { await Task.Delay(ms, ct); return r; });
         public void EnqueueException(Exception ex)
-            => _queue.Enqueue(() => throw ex);
+            => _queue.Enqueue(_ => Task.FromException<HttpResponseMessage>(ex));
 
         protected override Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
             if (_queue.TryDequeue(out var factory))
-                return Task.FromResult(factory());
+                return factory(ct);
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK));
         }
     }

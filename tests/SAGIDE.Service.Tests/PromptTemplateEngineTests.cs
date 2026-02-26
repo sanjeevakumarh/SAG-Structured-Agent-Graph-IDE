@@ -1,5 +1,5 @@
 using SAGIDE.Core.Models;
-using SAGIDE.Service.Orchestrator;
+using SAGIDE.Service.Prompts;
 
 namespace SAGIDE.Service.Tests;
 
@@ -24,10 +24,11 @@ public class PromptTemplateEngineTests
     }
 
     [Fact]
-    public void Resolve_UnsetContextVariable_PlaceholderInserted()
+    public void Resolve_UnsetContextVariable_EmptyString()
     {
+        // Scriban emits empty string for variables not present in the context.
         var result = Resolve("Hello {{missing}}!", context: []);
-        Assert.Equal("Hello [missing: not set]!", result);
+        Assert.Equal("Hello !", result);
     }
 
     // ── Step output resolution ────────────────────────────────────────────────
@@ -105,27 +106,33 @@ public class PromptTemplateEngineTests
     // ── Unknown step / field ──────────────────────────────────────────────────
 
     [Fact]
-    public void Resolve_UnknownStep_NotAvailablePlaceholder()
+    public void Resolve_UnknownStep_ReturnsTemplateUnchanged()
     {
-        var result = Resolve("{{missing_step.output}}", steps: []);
-        Assert.Equal("[missing_step.output: not available]", result);
+        // Scriban throws when accessing a member on an undefined variable;
+        // RenderWorkflowStep catches and returns the original template text.
+        const string template = "{{missing_step.output}}";
+        var result = Resolve(template, steps: []);
+        Assert.Equal(template, result);
     }
 
     [Fact]
-    public void Resolve_UnknownField_UnknownFieldPlaceholder()
+    public void Resolve_UnknownField_EmptyString()
     {
+        // Scriban emits empty string for fields not set on the step ScriptObject.
         var step = new WorkflowStepExecution { StepId = "s1" };
         var result = Resolve("{{s1.unknown_field}}", steps: new() { ["s1"] = step });
-        Assert.Equal("[s1.unknown_field: unknown field]", result);
+        Assert.Equal(string.Empty, result);
     }
 
-    // ── Hyphenated step IDs ───────────────────────────────────────────────────
+    // ── Step IDs with underscores (Scriban convention) ────────────────────────
 
     [Fact]
-    public void Resolve_HyphenatedStepId_Substituted()
+    public void Resolve_UnderscoreStepId_Substituted()
     {
-        var steps = Steps("generate-code", output: "console.log('hi')");
-        var result = Resolve("Code: {{generate-code.output}}", steps: steps);
+        // Scriban uses underscores for identifiers; hyphenated IDs are not supported
+        // (the minus sign is treated as arithmetic). All real workflow YAMLs use underscores.
+        var steps = Steps("generate_code", output: "console.log('hi')");
+        var result = Resolve("Code: {{generate_code.output}}", steps: steps);
         Assert.Equal("Code: console.log('hi')", result);
     }
 
@@ -151,7 +158,7 @@ public class PromptTemplateEngineTests
         string template,
         Dictionary<string, string>? context = null,
         Dictionary<string, WorkflowStepExecution>? steps = null)
-        => PromptTemplateEngine.Resolve(
+        => PromptTemplate.RenderWorkflowStep(
             template,
             context ?? [],
             steps   ?? []);

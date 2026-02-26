@@ -33,4 +33,25 @@ public class CommunicationConfig
     /// Default 10 000 — covers ~20 s of 500-token/s streaming at typical message sizes.
     /// </summary>
     public int MaxBroadcastQueueSize { get; set; } = 10_000;
+
+    // ── Authentication ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Apply Windows PipeSecurity ACL so only the current user's SID may connect.
+    /// Effective only on Windows; ignored on other platforms. Default true.
+    /// </summary>
+    public bool EnablePipeSecurity { get; set; } = true;
+
+    /// <summary>
+    /// Optional shared secret for a challenge-free handshake (defense-in-depth).
+    /// When set, the very first message from each client must be a pipe_auth frame
+    /// whose payload matches this value (UTF-8). Empty/null disables the check.
+    /// </summary>
+    public string? SharedSecret { get; set; }
+
+    /// <summary>
+    /// Maximum time (ms) the server waits for the client to complete the shared-secret
+    /// handshake before closing the connection. Default 5 000 ms.
+    /// </summary>
+    public int HandshakeTimeoutMs { get; set; } = 5_000;
 }

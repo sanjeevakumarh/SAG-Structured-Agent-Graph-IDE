@@ -77,19 +77,29 @@ internal static class PromptEndpoints
                 });
             }
 
-            // Single-model prompt: submit as a regular AgentTask
+            // Single-model prompt: render the Scriban template with caller-supplied variables,
+            // then submit as a regular AgentTask.
             var modelId     = prompt.ModelPreference?.Primary
                            ?? prompt.ModelPreference?.Orchestrator
                            ?? string.Empty;
             var providerStr = ParseProviderFromModelId(modelId);
             var cleanModel  = StripProviderPrefix(modelId);
 
+            // Merge YAML defaults with caller overrides, then render the Scriban template.
+            var renderVars = prompt.Variables
+                .ToDictionary(kv => kv.Key, kv => (object)kv.Value);
+            if (variables is not null)
+                foreach (var kv in variables)
+                    renderVars[kv.Key] = kv.Value;
+
+            var renderedPrompt = PromptTemplate.Render(prompt, renderVars);
+
             var task = new AgentTask
             {
                 AgentType     = AgentType.Generic,
                 ModelProvider = providerStr,
                 ModelId       = cleanModel,
-                Description   = $"[Ad-hoc] {domain}/{name}: {prompt.Description?.Trim() ?? string.Empty}",
+                Description   = renderedPrompt,
                 SourceTag     = prompt.SourceTag ?? $"{domain}_adhoc",
                 Priority      = 1,
                 Metadata      = new Dictionary<string, string>
