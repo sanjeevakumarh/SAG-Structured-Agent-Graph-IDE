@@ -4,6 +4,78 @@ using SAGIDE.Service.Agents;
 
 namespace SAGIDE.Service.Tests;
 
+/// <summary>Basic smoke tests for ResultParser JSON extraction and plain-text fallback.</summary>
+public class ResultParserTests
+{
+    private ResultParser CreateParser() =>
+        new(NullLogger<ResultParser>.Instance);
+
+    [Fact]
+    public void Parse_JsonBlock_ExtractsIssues()
+    {
+        var parser = CreateParser();
+        var rawOutput = """
+            Here are the issues I found:
+
+            ```json
+            {
+              "issues": [
+                {
+                  "filePath": "src/Foo.cs",
+                  "line": 42,
+                  "severity": "high",
+                  "message": "SQL injection vulnerability",
+                  "suggestedFix": "Use parameterized query"
+                }
+              ]
+            }
+            ```
+            """;
+
+        var result = parser.Parse("task1", AgentType.CodeReview, rawOutput, 1000);
+
+        Assert.True(result.Success);
+        Assert.Single(result.Issues);
+        Assert.Equal("src/Foo.cs", result.Issues[0].FilePath);
+        Assert.Equal(42, result.Issues[0].Line);
+        Assert.Equal(IssueSeverity.High, result.Issues[0].Severity);
+        Assert.Contains("SQL injection", result.Issues[0].Message);
+    }
+
+    [Fact]
+    public void Parse_NoJson_ReturnsRawOutput()
+    {
+        var parser = CreateParser();
+        var rawOutput = "This is just a plain text response with no structured data.";
+
+        var result = parser.Parse("task2", AgentType.Documentation, rawOutput, 500);
+
+        Assert.True(result.Success);
+        Assert.Equal(rawOutput, result.Output);
+        Assert.Empty(result.Issues);
+    }
+
+    [Fact]
+    public void Parse_CodeBlocks_ExtractsChanges()
+    {
+        var parser = CreateParser();
+        var rawOutput = """
+            Here are the generated tests:
+
+            ```csharp
+            [Fact]
+            public void Test_Add() { Assert.Equal(3, Add(1, 2)); }
+            ```
+            """;
+
+        var result = parser.Parse("task3", AgentType.TestGeneration, rawOutput, 800);
+
+        Assert.True(result.Success);
+        Assert.Single(result.Changes);
+        Assert.Contains("Assert.Equal", result.Changes[0].NewContent);
+    }
+}
+
 /// <summary>
 /// Extended unit tests for <see cref="ResultParser"/> covering root-array payloads,
 /// changes extraction, severity mapping edge cases, and field aliases.

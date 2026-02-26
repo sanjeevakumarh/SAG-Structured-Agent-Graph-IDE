@@ -25,7 +25,7 @@ namespace SAGIDE.Service.Orchestrator;
 ///   - Live context variable updates while the workflow is running
 ///   - SQLite persistence: instances survive service restarts
 ///
-/// Cancel behaviour (Item 2):
+/// Cancel behavior (Item 2):
 ///   CancelAsync() calls ITaskSubmissionService.CancelTaskAsync() for every task that has
 ///   been submitted (whether it is still Queued or actively Running in the orchestrator),
 ///   then marks all remaining Pending steps as Skipped.
@@ -47,7 +47,7 @@ public class WorkflowEngine
     // taskId → (instanceId, stepId) — reverse lookup for OnTaskUpdateAsync
     private readonly ConcurrentDictionary<string, (string InstanceId, string StepId)> _taskToStep = new();
 
-    // Per-instance semaphore to serialise DAG evaluation (prevents races when parallel steps complete)
+    // Per-instance semaphore to serialize DAG evaluation (prevents races when parallel steps complete)
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
 
     public event Action<WorkflowInstance>? OnWorkflowUpdate;
@@ -109,7 +109,7 @@ public class WorkflowEngine
                 inst.InputContext[param.Name] = param.Default;
         }
 
-        // Initialise all step executions as Pending
+        // Initialize all step executions as Pending
         foreach (var step in def.Steps)
             inst.StepExecutions[step.Id] = new WorkflowStepExecution { StepId = step.Id };
 
@@ -196,7 +196,7 @@ public class WorkflowEngine
                                 && e.Status == WorkflowStepStatus.Completed))
                 .ToList();
 
-            foreach (var step in pendingSteps)
+            if (pendingSteps.Count > 0)
                 await SubmitReadyStepsAsync(inst, def, ct);
 
             _logger.LogInformation(
@@ -256,6 +256,9 @@ public class WorkflowEngine
                 default:
                     return;
             }
+
+            // Clean up reverse lookup for this task — it has reached a terminal state
+            _taskToStep.TryRemove(status.TaskId, out _);
 
             _logger.LogDebug(
                 "Workflow {InstanceId} step '{StepId}' → {Status}",
@@ -439,34 +442,44 @@ public class WorkflowEngine
     {
         _ = Task.Run(async () =>
         {
-            await Task.Delay(TimeSpan.FromHours(slaHours), ct);
-            if (!_active.TryGetValue(instanceId, out var entry)) return;
-
-            var (inst, def) = entry;
-            var lk = _locks[instanceId];
-            await lk.WaitAsync(ct);
             try
             {
-                var stepExec = inst.StepExecutions.GetValueOrDefault(stepId);
-                if (stepExec?.Status != WorkflowStepStatus.WaitingForApproval) return;
+                await Task.Delay(TimeSpan.FromHours(slaHours), ct);
+                if (!_active.TryGetValue(instanceId, out var entry)) return;
 
-                _logger.LogWarning(
-                    "Workflow {Id} step '{StepId}' SLA ({Hrs}h) exceeded — action: {Action}",
-                    instanceId, stepId, slaHours, timeoutAction);
+                var (inst, def) = entry;
+                var lk = _locks[instanceId];
+                await lk.WaitAsync(ct);
+                try
+                {
+                    var stepExec = inst.StepExecutions.GetValueOrDefault(stepId);
+                    if (stepExec?.Status != WorkflowStepStatus.WaitingForApproval) return;
 
-                var slaReason = $"SLA of {slaHours} hour(s) exceeded with no human response.";
-                stepExec.Error       = slaReason;
-                stepExec.CompletedAt = DateTime.UtcNow;
-                RecordAudit(stepExec, WorkflowStepStatus.Failed, slaReason);
-                SkipDownstream(stepId, inst, def);
+                    _logger.LogWarning(
+                        "Workflow {Id} step '{StepId}' SLA ({Hrs}h) exceeded — action: {Action}",
+                        instanceId, stepId, slaHours, timeoutAction);
 
-                inst.Status      = WorkflowStatus.Failed;
-                inst.CompletedAt = DateTime.UtcNow;
+                    var slaReason = $"SLA of {slaHours} hour(s) exceeded with no human response.";
+                    stepExec.Error       = slaReason;
+                    stepExec.CompletedAt = DateTime.UtcNow;
+                    RecordAudit(stepExec, WorkflowStepStatus.Failed, slaReason);
+                    SkipDownstream(stepId, inst, def);
 
-                await PersistInstanceAsync(inst);
-                BroadcastUpdate(inst);
+                    inst.Status      = WorkflowStatus.Failed;
+                    inst.CompletedAt = DateTime.UtcNow;
+
+                    await PersistInstanceAsync(inst);
+                    BroadcastUpdate(inst);
+                }
+                finally { lk.Release(); }
             }
-            finally { lk.Release(); }
+            catch (OperationCanceledException) { /* service shutdown or instance cancelled — expected */ }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Unexpected error in approval SLA timeout handler for instance {Id} step '{StepId}'",
+                    instanceId, stepId);
+            }
         }, ct);
     }
 
@@ -614,7 +627,7 @@ public class WorkflowEngine
                         ResetAllStepsForNewIteration(loopTargetDef.Id, inst, def);
                     else if (scope == "FROM_CODEGEN")
                         ResetLoopBodyForNewIteration(loopTargetDef.Id, inst, def);
-                    // FAILING_NODES_ONLY: only the loop target was reset above (default behaviour)
+                    // FAILING_NODES_ONLY: only the loop target was reset above (default behavior)
 
                     // ConvergenceHintMemory — inject causal context from the prior iteration
                     if (policy?.ConvergenceHintMemory == true)
@@ -1305,7 +1318,7 @@ public class WorkflowEngine
             return (false, $"Step '{stepId}' not found.");
         }
 
-        return (false, $"Unrecognised constraint expression: '{expr}'");
+        return (false, $"Unrecognized constraint expression: '{expr}'");
     }
 
     private static bool CompareInts(int actual, string op, int expected) => op switch
@@ -1577,7 +1590,13 @@ public class WorkflowEngine
             await Task.Delay(TimeSpan.FromSeconds(30));
             // Remove _active first: any thread that gets the semaphore after this point
             // will enter EvaluateDagAsync, find no active entry, and return immediately.
-            _active.TryRemove(instanceId, out _);
+            // Also purge any remaining _taskToStep entries for this instance's steps.
+            if (_active.TryRemove(instanceId, out var removed))
+            {
+                foreach (var exec in removed.Inst.StepExecutions.Values)
+                    if (exec.TaskId is not null)
+                        _taskToStep.TryRemove(exec.TaskId, out _);
+            }
             // Remove the semaphore entry to bound _locks size, but do NOT dispose it.
             _locks.TryRemove(instanceId, out _);
             _logger.LogDebug("Cleaned up completed instance {Id} from active set", instanceId);

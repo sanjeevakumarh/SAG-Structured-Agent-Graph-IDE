@@ -16,6 +16,7 @@ public class AgentOrchestrator : ITaskSubmissionService
 {
     private readonly TaskQueue _taskQueue;
     private readonly IServiceProvider _serviceProvider;
+    private readonly Dictionary<ModelProvider, IAgentProvider> _providers;
     private readonly DeadLetterQueue _deadLetterQueue;
     private readonly TimeoutConfig _timeoutConfig;
     private readonly AgentLimitsConfig _agentLimitsConfig;
@@ -57,10 +58,16 @@ public class AgentOrchestrator : ITaskSubmissionService
         Infrastructure.GitService? gitService = null,
         Infrastructure.GitConfig? gitConfig = null,
         int broadcastThrottleMs = 200,
-        int maxFileSizeChars = 32_000)
+        int maxFileSizeChars = 32_000,
+        Providers.ProviderFactory? providerFactory = null)
     {
         _taskQueue = taskQueue;
         _serviceProvider = serviceProvider;
+        // Cache providers at construction so task execution never calls back into the DI container.
+        // Falls back to service-locator pattern if providerFactory is not supplied (e.g. tests).
+        _providers = providerFactory is not null
+            ? providerFactory.GetAllProviders().ToDictionary(p => p.Provider)
+            : serviceProvider.GetServices<IAgentProvider>().ToDictionary(p => p.Provider);
         _deadLetterQueue = deadLetterQueue;
         _timeoutConfig = timeoutConfig;
         _agentLimitsConfig = agentLimitsConfig;
@@ -76,7 +83,7 @@ public class AgentOrchestrator : ITaskSubmissionService
         _maxFileSizeChars = maxFileSizeChars;
     }
 
-    // Idempotent — duplicate task ID returns existing, no re-execution
+    // R001: Idempotent — duplicate task ID returns existing, no re-execution
     public async Task<string> SubmitTaskAsync(AgentTask task, CancellationToken ct)
     {
         var existing = _taskQueue.GetTask(task.Id);
@@ -188,9 +195,8 @@ public class AgentOrchestrator : ITaskSubmissionService
             taskTimeoutCts.CancelAfter(_timeoutConfig.TaskExecutionTimeout);
             var taskCt = taskTimeoutCts.Token;
 
-            // Resolve the agent provider
-            var providers = _serviceProvider.GetServices<IAgentProvider>().ToList();
-            var provider = providers.FirstOrDefault(p => p.Provider == task.ModelProvider);
+            // Resolve the agent provider from the pre-built cache
+            _providers.TryGetValue(task.ModelProvider, out var provider);
 
             if (provider is null)
             {
@@ -198,7 +204,7 @@ public class AgentOrchestrator : ITaskSubmissionService
                 return;
             }
 
-            // Max iteration support — each iteration feeds the previous result back into the
+            // R004: Max iteration support — each iteration feeds the previous result back into the
             // prompt so the agent can self-refine.  The default limit is 1 for most agent types,
             // making the loop effectively single-shot.  Refactoring agents default to 5.
             var maxIterations = _agentLimitsConfig.GetMaxIterations(task.AgentType);
@@ -239,14 +245,14 @@ public class AgentOrchestrator : ITaskSubmissionService
                     task.Metadata["changeCount"] = cachedResult.Changes.Count.ToString();
                     task.Metadata["issuesJson"]  = System.Text.Json.JsonSerializer.Serialize(cachedResult.Issues);
                     task.Metadata["changesJson"] = System.Text.Json.JsonSerializer.Serialize(cachedResult.Changes);
-                    await PersistResultAsync(cachedResult);
 
                     task.Progress = 100;
                     task.Status = AgentTaskStatus.Completed;
                     task.StatusMessage = "Done (cached)";
                     task.CompletedAt = DateTime.UtcNow;
                     BroadcastUpdate(task);
-                    await PersistTaskAsync(task);
+                    // Atomic: task status + result in one transaction
+                    await PersistCompletedAsync(task, cachedResult);
 
                     if (task.Metadata.ContainsKey("workflowInstanceId"))
                         _ = _serviceProvider.GetService<WorkflowEngine>()?.OnTaskUpdateAsync(ToResponse(task));
@@ -254,6 +260,7 @@ public class AgentOrchestrator : ITaskSubmissionService
                 }
             }
 
+            AgentResult? lastResult = null;
             for (int iteration = 1; iteration <= maxIterations; iteration++)
             {
                 taskCt.ThrowIfCancellationRequested();
@@ -290,22 +297,23 @@ public class AgentOrchestrator : ITaskSubmissionService
 
                 // Parse the response into structured result
                 var latency = sw.ElapsedMilliseconds;
-                var result = _resultParser.Parse(task.Id, task.AgentType, lastResponse, latency);
+                lastResult = _resultParser.Parse(task.Id, task.AgentType, lastResponse, latency);
 
                 // Store parsed response in metadata for the extension to consume.
                 // issuesJson / changesJson carry the full structured lists so ToResponse()
                 // can reconstruct them without an additional repository round-trip.
                 task.Metadata["response"]    = lastResponse;
-                task.Metadata["issueCount"]  = result.Issues.Count.ToString();
-                task.Metadata["changeCount"] = result.Changes.Count.ToString();
-                task.Metadata["issuesJson"]  = System.Text.Json.JsonSerializer.Serialize(result.Issues);
-                task.Metadata["changesJson"] = System.Text.Json.JsonSerializer.Serialize(result.Changes);
+                task.Metadata["issueCount"]  = lastResult.Issues.Count.ToString();
+                task.Metadata["changeCount"] = lastResult.Changes.Count.ToString();
+                task.Metadata["issuesJson"]  = System.Text.Json.JsonSerializer.Serialize(lastResult.Issues);
+                task.Metadata["changesJson"] = System.Text.Json.JsonSerializer.Serialize(lastResult.Changes);
 
-                // Persist the result
-                await PersistResultAsync(result);
+                // Persist intermediate result so partial state is visible during multi-iteration runs.
+                // The final atomic write below will overwrite with the same data for the last iteration.
+                await PersistResultAsync(lastResult);
 
                 // Stop early if the agent reported no issues — further iterations won't help.
-                if (result.Issues.Count == 0)
+                if (lastResult.Issues.Count == 0)
                     break;
             }
 
@@ -314,7 +322,8 @@ public class AgentOrchestrator : ITaskSubmissionService
             task.StatusMessage = "Done";
             task.CompletedAt = DateTime.UtcNow;
             BroadcastUpdate(task);
-            await PersistTaskAsync(task);
+            // Atomic: task Completed status + final result in one transaction
+            await PersistCompletedAsync(task, lastResult!);
 
             // Determinism — store final output in cache (fire-and-forget, non-fatal)
             if (_repository is not null && !string.IsNullOrEmpty(lastResponse))
@@ -704,6 +713,13 @@ public class AgentOrchestrator : ITaskSubmissionService
         if (_repository is null) return;
         try { await _repository.SaveResultAsync(result); }
         catch (Exception ex) { _logger.LogError(ex, "Failed to persist result for task {TaskId}", result.TaskId); }
+    }
+
+    private async Task PersistCompletedAsync(AgentTask task, AgentResult result)
+    {
+        if (_repository is null) return;
+        try { await _repository.SaveTaskCompletedWithResultAsync(task, result); }
+        catch (Exception ex) { _logger.LogError(ex, "Failed to atomically persist completed task {TaskId}", task.Id); }
     }
 
     /// <summary>

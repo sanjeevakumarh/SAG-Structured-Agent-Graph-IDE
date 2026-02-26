@@ -6,8 +6,15 @@ namespace SAGIDE.Service.Orchestrator;
 public class TaskQueue
 {
     private readonly ConcurrentDictionary<string, AgentTask> _allTasks = new();
-    private readonly PriorityQueue<AgentTask, int> _pendingQueue = new();
     private readonly object _queueLock = new();
+
+    // Dual-heap dequeue — O(log n) instead of the prior O(n log n) OrderBy scan.
+    //   _readyQueue    — tasks whose ScheduledFor is null or already past, keyed by -Priority
+    //                    (PriorityQueue is a min-heap, so -Priority gives highest-priority-first).
+    //   _scheduledQueue — tasks whose ScheduledFor is still in the future, keyed by ScheduledFor.Ticks
+    //                     (min-heap = earliest-due-first, enabling O(log n) promotion).
+    private readonly PriorityQueue<AgentTask, int>  _readyQueue     = new();
+    private readonly PriorityQueue<AgentTask, long> _scheduledQueue = new();
 
     // ── Bounded in-memory history ─────────────────────────────────────────────
     // Terminal tasks are candidates for eviction; active tasks are never evicted.
@@ -26,8 +33,10 @@ public class TaskQueue
         _allTasks[task.Id] = task;
         lock (_queueLock)
         {
-            // Lower number = higher priority
-            _pendingQueue.Enqueue(task, -task.Priority);
+            if (!task.ScheduledFor.HasValue || task.ScheduledFor.Value <= DateTime.UtcNow)
+                _readyQueue.Enqueue(task, -task.Priority);
+            else
+                _scheduledQueue.Enqueue(task, task.ScheduledFor.Value.Ticks);
         }
         return task.Id;
     }
@@ -58,42 +67,36 @@ public class TaskQueue
     }
 
     /// <summary>
-    /// Returns the highest-priority task that is ready to run now.
+    /// Returns the highest-priority task that is ready to run now (O(log n)).
     /// If all pending tasks are scheduled for the future, returns (null, delay) where
     /// delay is the time until the next task becomes ready (capped at 1 minute).
-    /// Returns (null, null) when the queue is empty.
+    /// Returns (null, null) when both heaps are empty.
     /// </summary>
     public (AgentTask? task, TimeSpan? retryAfter) DequeueOrGetDelay()
     {
         lock (_queueLock)
         {
-            // Find the highest-priority task that is ready to run (ScheduledFor null or in the past)
-            var ready = _pendingQueue.UnorderedItems
-                .OrderBy(i => i.Priority)  // lower priority int = higher priority (negated on enqueue)
-                .Select(i => i.Element)
-                .FirstOrDefault(t => !t.ScheduledFor.HasValue || t.ScheduledFor.Value <= DateTime.UtcNow);
+            PromoteScheduledTasks();
 
-            if (ready != null)
+            // Dequeue highest-priority ready task, skipping any that were cancelled while queued.
+            while (_readyQueue.TryDequeue(out var candidate, out _))
             {
-                _pendingQueue.Remove(ready, out _, out _);
-                ready.Status = AgentTaskStatus.Running;
-                ready.StartedAt = DateTime.UtcNow;
-                return (ready, null);
+                if (candidate.Status == AgentTaskStatus.Cancelled)
+                    continue; // already cancelled — discard without executing
+                candidate.Status    = AgentTaskStatus.Running;
+                candidate.StartedAt = DateTime.UtcNow;
+                return (candidate, null);
             }
 
-            // Nothing ready — find earliest scheduled task so caller knows when to retry
-            var earliest = _pendingQueue.UnorderedItems
-                .Select(i => i.Element)
-                .Where(t => t.ScheduledFor.HasValue)
-                .MinBy(t => t.ScheduledFor);
-
-            if (earliest != null)
+            // Nothing ready — report delay until next scheduled task
+            if (_scheduledQueue.TryPeek(out _, out var earliestTicks))
             {
-                var delay = earliest.ScheduledFor!.Value - DateTime.UtcNow;
+                var delay = TimeSpan.FromTicks(earliestTicks - DateTime.UtcNow.Ticks);
+                if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
                 return (null, delay < TimeSpan.FromMinutes(1) ? delay : TimeSpan.FromMinutes(1));
             }
 
-            return (null, null); // queue empty
+            return (null, null); // both heaps empty
         }
     }
 
@@ -117,7 +120,7 @@ public class TaskQueue
 
     public int PendingCount
     {
-        get { lock (_queueLock) { return _pendingQueue.Count; } }
+        get { lock (_queueLock) { return _readyQueue.Count + _scheduledQueue.Count; } }
     }
 
     public int RunningCount => _allTasks.Values.Count(t => t.Status == AgentTaskStatus.Running);
@@ -127,6 +130,23 @@ public class TaskQueue
         if (_allTasks.TryGetValue(taskId, out var task))
         {
             update(task);
+        }
+    }
+
+    // ── Private helpers ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Moves any scheduled tasks whose due time has arrived into the ready heap.
+    /// O(k log n) where k is the number of tasks promoted — typically 0.
+    /// Must be called under <see cref="_queueLock"/>.
+    /// </summary>
+    private void PromoteScheduledTasks()
+    {
+        var nowTicks = DateTime.UtcNow.Ticks;
+        while (_scheduledQueue.TryPeek(out _, out var ticks) && ticks <= nowTicks)
+        {
+            var task = _scheduledQueue.Dequeue();
+            _readyQueue.Enqueue(task, -task.Priority);
         }
     }
 }

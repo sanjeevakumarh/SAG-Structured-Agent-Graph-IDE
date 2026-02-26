@@ -27,10 +27,21 @@ public class ResilientHttpHandler
 
     public int TotalAttempts { get; private set; }
 
+    /// <summary>
+    /// Sends an HTTP request with retry, backoff, and timeout enforcement.
+    /// </summary>
+    /// <param name="requestFactory">Factory called once per attempt (request must not be reused).</param>
+    /// <param name="ct">Caller cancellation token.</param>
+    /// <param name="context">
+    /// Optional human-readable context string (e.g. "Claude/claude-opus-4-6") included in every
+    /// log message so failures can be diagnosed without reconstructing context from surrounding lines.
+    /// </param>
     public async Task<HttpResponseMessage> SendWithRetryAsync(
         Func<HttpRequestMessage> requestFactory,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? context = null)
     {
+        var ctx = context is not null ? $"[{context}] " : string.Empty;
         HttpResponseMessage? lastResponse = null;
         Exception? lastException = null;
         TotalAttempts = 0;
@@ -49,8 +60,8 @@ public class ResilientHttpHandler
                 var request = requestFactory();
 
                 _logger.LogDebug(
-                    "HTTP attempt {Attempt}/{Max}: {Method} {Uri}",
-                    attempt + 1, _retryPolicy.MaxRetries + 1,
+                    "{Context}HTTP attempt {Attempt}/{Max}: {Method} {Uri}",
+                    ctx, attempt + 1, _retryPolicy.MaxRetries + 1,
                     request.Method, request.RequestUri);
 
                 lastResponse = await _httpClient.SendAsync(request, timeoutCts.Token);
@@ -66,8 +77,8 @@ public class ResilientHttpHandler
                 if (!_retryPolicy.IsRetryable(statusCode))
                 {
                     _logger.LogWarning(
-                        "HTTP {StatusCode} is not retryable, failing immediately",
-                        statusCode);
+                        "{Context}HTTP {StatusCode} is not retryable, failing immediately",
+                        ctx, statusCode);
                     return lastResponse;
                 }
 
@@ -75,16 +86,16 @@ public class ResilientHttpHandler
                 if (attempt >= _retryPolicy.MaxRetries)
                 {
                     _logger.LogWarning(
-                        "HTTP {StatusCode} after all {Max} retries exhausted",
-                        statusCode, _retryPolicy.MaxRetries + 1);
+                        "{Context}HTTP {StatusCode} after all {Max} retries exhausted",
+                        ctx, statusCode, _retryPolicy.MaxRetries + 1);
                     return lastResponse;
                 }
 
                 // Calculate delay — honor Retry-After header for 429
                 var delay = GetRetryDelay(lastResponse, attempt);
                 _logger.LogWarning(
-                    "HTTP {StatusCode}, retrying in {DelayMs}ms (attempt {Attempt}/{Max})",
-                    statusCode, delay.TotalMilliseconds, attempt + 1, _retryPolicy.MaxRetries + 1);
+                    "{Context}HTTP {StatusCode}, retrying in {DelayMs}ms (attempt {Attempt}/{Max})",
+                    ctx, statusCode, delay.TotalMilliseconds, attempt + 1, _retryPolicy.MaxRetries + 1);
 
                 await Task.Delay(delay, ct);
             }
@@ -92,11 +103,11 @@ public class ResilientHttpHandler
             {
                 // Timeout on this attempt, not user cancellation
                 _logger.LogWarning(
-                    "HTTP timeout after {TimeoutMs}ms (attempt {Attempt}/{Max})",
-                    _timeout.TotalMilliseconds, attempt + 1, _retryPolicy.MaxRetries + 1);
+                    "{Context}HTTP timeout after {TimeoutMs}ms (attempt {Attempt}/{Max})",
+                    ctx, _timeout.TotalMilliseconds, attempt + 1, _retryPolicy.MaxRetries + 1);
 
                 lastException = new TimeoutException(
-                    $"Provider HTTP call timed out after {_timeout.TotalMilliseconds}ms");
+                    $"{ctx}Provider HTTP call timed out after {_timeout.TotalMilliseconds}ms");
 
                 if (attempt >= _retryPolicy.MaxRetries)
                     throw lastException;
@@ -113,8 +124,8 @@ public class ResilientHttpHandler
             {
                 lastException = ex;
                 _logger.LogWarning(ex,
-                    "HTTP request failed (attempt {Attempt}/{Max})",
-                    attempt + 1, _retryPolicy.MaxRetries + 1);
+                    "{Context}HTTP request failed (attempt {Attempt}/{Max})",
+                    ctx, attempt + 1, _retryPolicy.MaxRetries + 1);
 
                 if (attempt >= _retryPolicy.MaxRetries)
                     throw;

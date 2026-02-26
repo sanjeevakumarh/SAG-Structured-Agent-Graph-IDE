@@ -3,6 +3,64 @@ using SAGIDE.Service.Orchestrator;
 
 namespace SAGIDE.Service.Tests;
 
+/// <summary>Basic smoke tests for TaskQueue enqueue/dequeue/priority behavior.</summary>
+public class TaskQueueTests
+{
+    [Fact]
+    public void Enqueue_Dequeue_ReturnsTask()
+    {
+        var queue = new TaskQueue();
+        var task = new AgentTask { AgentType = AgentType.CodeReview, Description = "Test" };
+
+        queue.Enqueue(task);
+        var dequeued = queue.Dequeue();
+
+        Assert.NotNull(dequeued);
+        Assert.Equal(task.Id, dequeued.Id);
+        Assert.Equal(AgentTaskStatus.Running, dequeued.Status);
+    }
+
+    [Fact]
+    public void Dequeue_EmptyQueue_ReturnsNull()
+    {
+        var queue = new TaskQueue();
+        Assert.Null(queue.Dequeue());
+    }
+
+    [Fact]
+    public void GetTask_ExistingId_ReturnsTask()
+    {
+        var queue = new TaskQueue();
+        var task = new AgentTask { Description = "Test" };
+        queue.Enqueue(task);
+
+        var found = queue.GetTask(task.Id);
+        Assert.NotNull(found);
+        Assert.Equal(task.Id, found.Id);
+    }
+
+    [Fact]
+    public void GetTask_NonExistentId_ReturnsNull()
+    {
+        var queue = new TaskQueue();
+        Assert.Null(queue.GetTask("nonexistent"));
+    }
+
+    [Fact]
+    public void PriorityOrder_HigherPriorityFirst()
+    {
+        var queue = new TaskQueue();
+        var low  = new AgentTask { Description = "Low",  Priority = 0 };
+        var high = new AgentTask { Description = "High", Priority = 10 };
+
+        queue.Enqueue(low);
+        queue.Enqueue(high);
+
+        var first = queue.Dequeue();
+        Assert.Equal("High", first!.Description);
+    }
+}
+
 /// <summary>
 /// Extended unit tests for <see cref="TaskQueue"/> covering scheduled tasks,
 /// eviction, UpdateTask, RunningCount, and GetRunningTasks.

@@ -118,6 +118,8 @@ try
     var maxTaskHistory      = builder.Configuration.GetValue("SAGIDE:Orchestration:MaxTaskHistoryInMemory", 1000);
     var broadcastThrottleMs = builder.Configuration.GetValue("SAGIDE:Orchestration:BroadcastThrottleMs", 200);
     var maxFileSizeChars    = builder.Configuration.GetValue("SAGIDE:Orchestration:MaxFileSizeChars", 32_000);
+    PromptTemplateEngine.Configure(
+        builder.Configuration.GetValue("SAGIDE:Orchestration:MaxStepOutputChars", 4000));
     builder.Services.AddSingleton(new TaskQueue(maxTaskHistory));
     // Register AgentOrchestrator as both its concrete type and the ITaskSubmissionService interface.
     // WorkflowEngine depends on ITaskSubmissionService (not the concrete class) — this breaks
@@ -136,7 +138,8 @@ try
         sp.GetRequiredService<GitService>(),
         sp.GetRequiredService<GitConfig>(),
         broadcastThrottleMs,
-        maxFileSizeChars));
+        maxFileSizeChars,
+        sp.GetRequiredService<ProviderFactory>()));
     builder.Services.AddSingleton<ITaskSubmissionService>(sp => sp.GetRequiredService<AgentOrchestrator>());
 
     // Register workflow engine with all dependencies (Items 1, 3, 4, 6)

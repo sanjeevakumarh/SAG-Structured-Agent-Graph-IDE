@@ -112,6 +112,17 @@ public class MessageHandler
     private async Task<PipeMessage> HandleSubmitTask(PipeMessage message, CancellationToken ct)
     {
         var request = Deserialize<SubmitTaskRequest>(message.Payload!);
+
+        // Field-level validation — return a typed Error before touching any service.
+        if (string.IsNullOrWhiteSpace(request.Description))
+            return CreateError(message.RequestId, "Task description is required");
+        if (request.Description.Length > MaxDescriptionLength)
+            return CreateError(message.RequestId,
+                $"Task description exceeds maximum length ({MaxDescriptionLength} chars)");
+        if (request.FilePaths is { Count: > MaxFilePaths })
+            return CreateError(message.RequestId,
+                $"FilePaths count exceeds limit ({MaxFilePaths})");
+
         var metadata = request.Metadata ?? [];
         if (!string.IsNullOrEmpty(request.ModelEndpoint))
             metadata["modelEndpoint"] = request.ModelEndpoint;
@@ -137,6 +148,8 @@ public class MessageHandler
     private async Task<PipeMessage> HandleCancelTask(PipeMessage message, CancellationToken ct)
     {
         var taskId = Deserialize<string>(message.Payload!);
+        if (string.IsNullOrWhiteSpace(taskId))
+            return CreateError(message.RequestId, "Task ID is required");
         await _orchestrator.CancelTaskAsync(taskId, ct);
         return new PipeMessage
         {
@@ -148,6 +161,8 @@ public class MessageHandler
     private PipeMessage HandleGetTaskStatus(PipeMessage message)
     {
         var taskId = Deserialize<string>(message.Payload!);
+        if (string.IsNullOrWhiteSpace(taskId))
+            return CreateError(message.RequestId, "Task ID is required");
         var status = _orchestrator.GetTaskStatus(taskId);
         return new PipeMessage { Type = MessageTypes.TaskUpdate, RequestId = message.RequestId,
             Payload = status is not null ? Serialize(status) : null };
@@ -374,7 +389,7 @@ public class MessageHandler
         };
     }
 
-    // ── GetModels — returns configured model list + affinities from appsettings ─
+    // ── GetModels — returns configured model list + affinities from app settings ─
 
     private PipeMessage HandleGetModels(PipeMessage message)
     {
@@ -426,7 +441,7 @@ public class MessageHandler
         }
 
         // Build cloud model options — always include so users can see and select them;
-        // mark unconfigured ones so users know they need to set an API key.
+        // mark un-configured ones so users know they need to set an API key.
         var anthropicKey = _configuration["SAGIDE:ApiKeys:Anthropic"] ?? "";
         var openaiKey    = _configuration["SAGIDE:ApiKeys:OpenAI"]    ?? "";
         var googleKey    = _configuration["SAGIDE:ApiKeys:Google"]    ?? "";
@@ -533,6 +548,13 @@ public class MessageHandler
             Payload   = Serialize(new { models, affinities }),
         };
     }
+
+    // ── Validation limits ────────────────────────────────────────────────────
+    // These guard against obviously malformed requests reaching the orchestrator.
+    // They are intentionally conservative; real size limits on file content are
+    // enforced in AgentOrchestrator via MaxFileSizeChars from config.
+    private const int MaxDescriptionLength = 10_000;
+    private const int MaxFilePaths         = 100;
 
     private static PipeMessage CreateError(string? requestId, string error) => new()
     {

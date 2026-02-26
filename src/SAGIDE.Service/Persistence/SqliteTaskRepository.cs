@@ -13,7 +13,7 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
 
     public SqliteTaskRepository(string dbPath, ILogger<SqliteTaskRepository> logger)
     {
-        _connectionString = $"Data Source={dbPath}";
+        _connectionString = $"Data Source={dbPath};Pooling=True";
         _logger = logger;
     }
 
@@ -110,6 +110,76 @@ public class SqliteTaskRepository : ITaskRepository, IActivityRepository, IWorkf
         cmd.Parameters.AddWithValue("@errorMessage", (object?)result.ErrorMessage ?? DBNull.Value);
 
         await cmd.ExecuteNonQueryAsync();
+    }
+
+    public async Task SaveTaskCompletedWithResultAsync(AgentTask task, AgentResult result)
+    {
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync();
+        await using var txn = await conn.BeginTransactionAsync();
+        try
+        {
+            var taskCmd = conn.CreateCommand();
+            taskCmd.Transaction = (Microsoft.Data.Sqlite.SqliteTransaction)txn;
+            taskCmd.CommandText = SqlQueries.UpsertTask;
+            taskCmd.Parameters.AddWithValue("@id", task.Id);
+            taskCmd.Parameters.AddWithValue("@agentType", task.AgentType.ToString());
+            taskCmd.Parameters.AddWithValue("@modelProvider", task.ModelProvider.ToString());
+            taskCmd.Parameters.AddWithValue("@modelId", task.ModelId);
+            taskCmd.Parameters.AddWithValue("@description", task.Description);
+            taskCmd.Parameters.AddWithValue("@filePaths", JsonSerializer.Serialize(task.FilePaths));
+            taskCmd.Parameters.AddWithValue("@status", task.Status.ToString());
+            taskCmd.Parameters.AddWithValue("@progress", task.Progress);
+            taskCmd.Parameters.AddWithValue("@statusMessage", (object?)task.StatusMessage ?? DBNull.Value);
+            taskCmd.Parameters.AddWithValue("@priority", task.Priority);
+            taskCmd.Parameters.AddWithValue("@metadata", JsonSerializer.Serialize(task.Metadata));
+            taskCmd.Parameters.AddWithValue("@createdAt", task.CreatedAt.ToString("O"));
+            taskCmd.Parameters.AddWithValue("@startedAt", task.StartedAt?.ToString("O") ?? (object)DBNull.Value);
+            taskCmd.Parameters.AddWithValue("@completedAt", task.CompletedAt?.ToString("O") ?? (object)DBNull.Value);
+            taskCmd.Parameters.AddWithValue("@scheduledFor", task.ScheduledFor?.ToString("O") ?? (object)DBNull.Value);
+            taskCmd.Parameters.AddWithValue("@comparisonGroupId", (object?)task.ComparisonGroupId ?? DBNull.Value);
+            taskCmd.Parameters.AddWithValue("@sourceTag", (object?)task.SourceTag ?? DBNull.Value);
+            await taskCmd.ExecuteNonQueryAsync();
+
+            var resultCmd = conn.CreateCommand();
+            resultCmd.Transaction = (Microsoft.Data.Sqlite.SqliteTransaction)txn;
+            resultCmd.CommandText = SqlQueries.UpsertResult;
+            resultCmd.Parameters.AddWithValue("@taskId", result.TaskId);
+            resultCmd.Parameters.AddWithValue("@success", result.Success ? 1 : 0);
+            resultCmd.Parameters.AddWithValue("@output", result.Output);
+            resultCmd.Parameters.AddWithValue("@issues", JsonSerializer.Serialize(result.Issues));
+            resultCmd.Parameters.AddWithValue("@changes", JsonSerializer.Serialize(result.Changes));
+            resultCmd.Parameters.AddWithValue("@tokensUsed", result.TokensUsed);
+            resultCmd.Parameters.AddWithValue("@estimatedCost", result.EstimatedCost);
+            resultCmd.Parameters.AddWithValue("@latencyMs", result.LatencyMs);
+            resultCmd.Parameters.AddWithValue("@errorMessage", (object?)result.ErrorMessage ?? DBNull.Value);
+            await resultCmd.ExecuteNonQueryAsync();
+
+            await txn.CommitAsync();
+        }
+        catch
+        {
+            await txn.RollbackAsync();
+            throw;
+        }
+    }
+
+    public async Task<bool> CheckHealthAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            await using var conn = new SqliteConnection(_connectionString);
+            await conn.OpenAsync(ct);
+            var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT 1";
+            await cmd.ExecuteScalarAsync(ct);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Database health check failed");
+            return false;
+        }
     }
 
     public async Task<AgentTask?> GetTaskAsync(string taskId)

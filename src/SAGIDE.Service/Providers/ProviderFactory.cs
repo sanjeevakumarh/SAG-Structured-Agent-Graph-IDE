@@ -43,7 +43,7 @@ public class ProviderFactory
         {
             var timeout = TimeSpan.FromMilliseconds(_timeoutConfig.GetProviderTimeoutMs(ModelProvider.Claude));
             _providers[ModelProvider.Claude] = new ClaudeProvider(anthropicKey,
-                new RetryPolicy { RetryableStatusCodes = [429, 500, 502, 503, 529] },
+                BuildRetryPolicy("Claude", new RetryPolicy { RetryableStatusCodes = [429, 500, 502, 503, 529] }),
                 timeout, _loggerFactory.CreateLogger<ClaudeProvider>(), claudeMaxTokens);
         }
 
@@ -54,7 +54,8 @@ public class ProviderFactory
             // Without either, every call would immediately return 401/404 and land in the DLQ.
             if (!string.IsNullOrEmpty(openaiKey) || openAiCompatibleEndpoints.Count > 0)
             {
-                _providers[ModelProvider.Codex] = new CodexProvider(openaiKey, RetryPolicy.Default,
+                _providers[ModelProvider.Codex] = new CodexProvider(openaiKey,
+                    BuildRetryPolicy("Codex", RetryPolicy.Default),
                     timeout, _loggerFactory.CreateLogger<CodexProvider>(), openAiCompatibleEndpoints, codexMaxTokens);
             }
         }
@@ -62,7 +63,8 @@ public class ProviderFactory
         if (!string.IsNullOrEmpty(googleKey))
         {
             var timeout = TimeSpan.FromMilliseconds(_timeoutConfig.GetProviderTimeoutMs(ModelProvider.Gemini));
-            _providers[ModelProvider.Gemini] = new GeminiProvider(googleKey, RetryPolicy.Default,
+            _providers[ModelProvider.Gemini] = new GeminiProvider(googleKey,
+                BuildRetryPolicy("Gemini", RetryPolicy.Default),
                 timeout, _loggerFactory.CreateLogger<GeminiProvider>(), geminiMaxTokens);
         }
 
@@ -75,9 +77,35 @@ public class ProviderFactory
             .FirstOrDefault(u => !string.IsNullOrEmpty(u)) ?? string.Empty;
 
         _providers[ModelProvider.Ollama] = new OllamaProvider(
-            defaultServer, modelEndpoints, RetryPolicy.ForOllama, ollamaTimeout,
+            defaultServer, modelEndpoints, BuildRetryPolicy("Ollama", RetryPolicy.ForOllama), ollamaTimeout,
             _loggerFactory.CreateLogger<OllamaProvider>(),
             _ollamaHealthMonitor, ollamaMaxTokens);
+    }
+
+    /// <summary>
+    /// Reads per-provider retry policy from <c>SAGIDE:Resilience:Providers:{name}</c>.
+    /// Falls back to <paramref name="defaults"/> for any field that is absent from config.
+    /// </summary>
+    private RetryPolicy BuildRetryPolicy(string providerName, RetryPolicy defaults)
+    {
+        var section = _configuration.GetSection($"SAGIDE:Resilience:Providers:{providerName}");
+        if (!section.Exists()) return defaults;
+
+        var maxRetries      = section.GetValue("MaxRetries", defaults.MaxRetries);
+        var initialDelayMs  = section.GetValue("InitialDelayMs", (int)defaults.InitialDelay.TotalMilliseconds);
+        var strategyStr     = section["BackoffStrategy"];
+        var strategy        = strategyStr is not null && Enum.TryParse<BackoffStrategy>(strategyStr, out var s)
+                                ? s : defaults.Strategy;
+        var codes           = section.GetSection("RetryableStatusCodes").Get<int[]>()
+                                ?? defaults.RetryableStatusCodes;
+
+        return new RetryPolicy
+        {
+            MaxRetries            = maxRetries,
+            InitialDelay          = TimeSpan.FromMilliseconds(initialDelayMs),
+            Strategy              = strategy,
+            RetryableStatusCodes  = codes,
+        };
     }
 
     private Dictionary<string, string> BuildOllamaRoutingTable()

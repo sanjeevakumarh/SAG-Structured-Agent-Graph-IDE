@@ -1,6 +1,7 @@
 using SAGIDE.Core.DTOs;
 using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
+using SAGIDE.Service.Communication;
 using SAGIDE.Service.Orchestrator;
 
 namespace SAGIDE.Service.Api;
@@ -9,13 +10,25 @@ internal static class TaskEndpoints
 {
     internal static IEndpointRouteBuilder MapTaskEndpoints(this IEndpointRouteBuilder app)
     {
-        // GET /api/health — quick liveness check
-        app.MapGet("/api/health", () => Results.Ok(new
+        // GET /api/health — liveness + readiness check (DB connectivity + IPC back-pressure)
+        app.MapGet("/api/health", async (ITaskRepository repository, NamedPipeServer pipeServer, CancellationToken ct) =>
         {
-            status  = "ok",
-            service = "SAGExtension",
-            utc     = DateTime.UtcNow,
-        }));
+            var dbOk        = await repository.CheckHealthAsync(ct);
+            var dropped     = pipeServer.DroppedMessageCount;
+            var overallOk   = dbOk;
+            var body = new
+            {
+                status   = overallOk ? "ok" : "degraded",
+                service  = "SAGExtension",
+                utc      = DateTime.UtcNow,
+                checks   = new
+                {
+                    database              = dbOk ? "ok" : "unreachable",
+                    ipcDroppedMessages    = dropped,
+                },
+            };
+            return overallOk ? Results.Ok(body) : Results.Json(body, statusCode: 503);
+        });
 
         // POST /api/tasks — submit a task from any frontend
         app.MapPost("/api/tasks", async (SubmitTaskRequest request, AgentOrchestrator orchestrator, CancellationToken ct) =>

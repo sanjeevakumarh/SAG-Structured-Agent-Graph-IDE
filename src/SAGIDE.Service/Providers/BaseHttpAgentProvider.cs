@@ -21,6 +21,7 @@ public abstract class BaseHttpAgentProvider : IAgentProvider
     protected readonly ILogger _logger;
     protected readonly int _maxTokens;
     private readonly bool _isConfigured;
+    private readonly TimeSpan _streamingTimeout;
 
     public abstract ModelProvider Provider { get; }
     public int LastInputTokens { get; protected set; }
@@ -35,9 +36,10 @@ public abstract class BaseHttpAgentProvider : IAgentProvider
         bool isConfigured = true,
         int maxTokens = 4096)
     {
-        _logger       = logger;
-        _isConfigured = isConfigured;
-        _maxTokens    = maxTokens;
+        _logger            = logger;
+        _isConfigured      = isConfigured;
+        _maxTokens         = maxTokens;
+        _streamingTimeout  = timeout;
 
         _httpClient = new HttpClient
         {
@@ -61,10 +63,10 @@ public abstract class BaseHttpAgentProvider : IAgentProvider
     /// </summary>
     protected virtual string GetStreamingEndpoint(ModelConfig model) => GetCompletionEndpoint(model);
 
-    /// <summary>JSON-serialisable request body for a non-streaming call.</summary>
+    /// <summary>JSON-serializable request body for a non-streaming call.</summary>
     protected abstract object BuildRequestBody(string prompt, ModelConfig model);
 
-    /// <summary>JSON-serialisable request body for a streaming call.</summary>
+    /// <summary>JSON-serializable request body for a streaming call.</summary>
     protected abstract object BuildStreamingRequestBody(string prompt, ModelConfig model);
 
     /// <summary>Extracts the text content from a parsed non-streaming response.</summary>
@@ -101,7 +103,8 @@ public abstract class BaseHttpAgentProvider : IAgentProvider
 
         _logger.LogDebug("Calling {Provider} with model {Model}", Provider, model.ModelId);
 
-        var response = await _resilientHandler.SendWithRetryAsync(CreateRequest, ct);
+        var response = await _resilientHandler.SendWithRetryAsync(
+            CreateRequest, ct, context: $"{Provider}/{model.ModelId}");
         response.EnsureSuccessStatusCode();
 
         var responseJson = await response.Content.ReadAsStringAsync(ct);
@@ -121,16 +124,40 @@ public abstract class BaseHttpAgentProvider : IAgentProvider
     {
         var endpoint = GetStreamingEndpoint(model);
         var json     = JsonSerializer.Serialize(BuildStreamingRequestBody(prompt, model));
-        var request  = new HttpRequestMessage(HttpMethod.Post, endpoint);
+
+        // Apply the same timeout budget as non-streaming calls.
+        using var timeoutCts = new CancellationTokenSource(_streamingTimeout);
+        using var linkedCts  = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+        var token = linkedCts.Token;
+
+        _logger.LogDebug("[{Provider}/{Model}] Streaming request started", Provider, model.ModelId);
+
+        var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
         request.Content = new StringContent(json, Encoding.UTF8, "application/json");
 
-        var response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
-        response.EnsureSuccessStatusCode();
+        HttpResponseMessage response;
+        try
+        {
+            response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token);
+            response.EnsureSuccessStatusCode();
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            _logger.LogError("[{Provider}/{Model}] Streaming timed out after {TimeoutMs}ms",
+                Provider, model.ModelId, (int)_streamingTimeout.TotalMilliseconds);
+            throw new TimeoutException(
+                $"{Provider}/{model.ModelId} streaming timed out after {(int)_streamingTimeout.TotalMilliseconds}ms");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "[{Provider}/{Model}] Streaming request failed", Provider, model.ModelId);
+            throw;
+        }
 
-        using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var stream = await response.Content.ReadAsStreamAsync(token);
         using var reader = new StreamReader(stream);
         string? line;
-        while ((line = await reader.ReadLineAsync(ct)) != null)
+        while ((line = await reader.ReadLineAsync(token)) != null)
         {
             if (!line.StartsWith("data: ")) continue;
             var data = line["data: ".Length..];
@@ -145,7 +172,7 @@ public abstract class BaseHttpAgentProvider : IAgentProvider
             if (!string.IsNullOrEmpty(text)) yield return text;
         }
 
-        _logger.LogInformation("{Provider} streaming complete (model {Model})", Provider, model.ModelId);
+        _logger.LogInformation("[{Provider}/{Model}] Streaming complete", Provider, model.ModelId);
     }
 
     public virtual Task<bool> IsAvailableAsync(CancellationToken ct = default)

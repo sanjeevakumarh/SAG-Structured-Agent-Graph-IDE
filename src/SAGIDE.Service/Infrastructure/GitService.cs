@@ -7,40 +7,38 @@ public class GitService
 {
     private readonly ILogger<GitService> _logger;
     private readonly SemaphoreSlim _branchSetupLock = new(1, 1);
-    private bool? _available;
+    // Lazy<T> guarantees thread-safe one-time initialization without explicit locking.
+    private readonly Lazy<bool> _available;
 
     public GitService(ILogger<GitService> logger)
     {
         _logger = logger;
+        _available = new Lazy<bool>(() =>
+        {
+            var (ok, _) = RunGitSync(".", "--version");
+            if (!ok) _logger.LogWarning("Git not found on PATH — git auto-commit disabled");
+            return ok;
+        });
     }
 
-    /// <summary>True if git is available on PATH. Checked once on first use.</summary>
-    public bool IsAvailable
-    {
-        get
-        {
-            if (_available.HasValue) return _available.Value;
-            var (ok, _) = RunGitSync(".", "--version");
-            _available = ok;
-            if (!ok) _logger.LogWarning("Git not found on PATH — git auto-commit disabled");
-            return _available.Value;
-        }
-    }
+    /// <summary>True if git is available on PATH. Checked once on first use (thread-safe).</summary>
+    public bool IsAvailable => _available.Value;
 
     public bool IsGitRepo(string workspacePath) =>
         Directory.Exists(Path.Combine(workspacePath, ".git"));
 
-    /// <summary>Cleans up any stale worktrees left by a previous crash. Called on startup.</summary>
+    /// <summary>Cleans up any stale work trees left by a previous crash. Called on startup.</summary>
     public Task PruneStaleWorktreesAsync(CancellationToken ct = default)
     {
-        // Find any worktree paths in temp that look like ours (commit logs and shadow workspaces)
+        // Find any work tree paths in temp that look like ours (commit logs and shadow workspaces)
         var tmpDir = Path.GetTempPath();
         var stale = Directory.GetDirectories(tmpDir, "sag-ide-wt-*")
             .Concat(Directory.GetDirectories(tmpDir, "sag-ide-sw-*"));
         foreach (var wt in stale)
         {
             _logger.LogInformation("Cleaning up stale worktree/shadow: {Path}", wt);
-            try { Directory.Delete(wt, recursive: true); } catch { /* best effort */ }
+            try { Directory.Delete(wt, recursive: true); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Could not delete stale worktree/shadow {Path}; skipping", wt); }
         }
         return Task.CompletedTask;
     }
@@ -73,7 +71,7 @@ public class GitService
             // Ensure the target branch exists (race-safe via lock)
             await EnsureBranchExistsAsync(workspacePath, targetBranch, ct);
 
-            // Add worktree pointing to the agent-log branch
+            // Add work-tree pointing to the agent-log branch
             if (Directory.Exists(worktreePath))
                 Directory.Delete(worktreePath, recursive: true);
 
@@ -110,7 +108,7 @@ public class GitService
         }
         finally
         {
-            // Always remove the worktree
+            // Always remove the work-tree
             if (Directory.Exists(worktreePath))
             {
                 await RunGitAsync(workspacePath, $"worktree remove --force \"{worktreePath}\"", ct);
@@ -121,7 +119,7 @@ public class GitService
     // ── Shadow workspace methods () ─────────────────────────────────────────
 
     /// <summary>
-    /// Creates an isolated git worktree in %TEMP%/sag-ide-sw-{instanceId8} branching from
+    /// Creates an isolated git work tree in %TEMP%/sag-ide-sw-{instanceId8} branching from
     /// <paramref name="branch"/> (default HEAD). Returns the shadow path on success, or null
     /// when git is unavailable or the workspace is not a git repo.
     /// </summary>
@@ -157,7 +155,7 @@ public class GitService
     }
 
     /// <summary>
-    /// Removes the shadow worktree, first via <c>git worktree remove --force</c> and falling
+    /// Removes the shadow work-tree, first via <c>git worktree remove --force</c> and falling
     /// back to a recursive directory delete.
     /// </summary>
     public async Task DestroyShadowAsync(

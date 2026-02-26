@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using Scriban;
 using Scriban.Runtime;
 using Microsoft.Extensions.Configuration;
@@ -145,7 +146,7 @@ public sealed class SubtaskCoordinator
             _logger.LogDebug("Data collection: {Name} ({Type})", step.Name, step.Type);
             try
             {
-                var result = await ExecuteStepAsync(step, vars, ct);
+                var result = await ExecuteStepAsync(step, vars, prompt, ct);
                 if (!string.IsNullOrEmpty(step.OutputVar))
                     vars[step.OutputVar] = result;
             }
@@ -161,6 +162,7 @@ public sealed class SubtaskCoordinator
     private async Task<object> ExecuteStepAsync(
         PromptDataCollectionStep step,
         Dictionary<string, object> vars,
+        PromptDefinition prompt,
         CancellationToken ct)
     {
         switch (step.Type.Trim().ToLowerInvariant())
@@ -269,10 +271,127 @@ public sealed class SubtaskCoordinator
                 return string.Join("\n\n---\n\n", sections);
             }
 
+            case "llm_queries":
+            {
+                if (!_search.IsConfigured)
+                {
+                    _logger.LogWarning(
+                        "llm_queries step '{Name}': search not configured — skipped", step.Name);
+                    return string.Empty;
+                }
+
+                if (string.IsNullOrWhiteSpace(step.PlanningPrompt))
+                {
+                    _logger.LogWarning(
+                        "llm_queries step '{Name}': no planning_prompt defined — skipped", step.Name);
+                    return string.Empty;
+                }
+
+                // Render planning prompt with current vars
+                var planningPromptText = ResolveSimpleTemplate(step.PlanningPrompt, vars);
+
+                // Determine model: step.Model → orchestrator model → empty (orchestrator default)
+                var modelSpecRaw = string.IsNullOrWhiteSpace(step.Model)
+                    ? (prompt.ModelPreference?.Orchestrator ?? string.Empty)
+                    : step.Model;
+                var modelSpec = ResolveModelTemplate(modelSpecRaw, vars);
+                var (planProvider, planModelId, planEndpoint) = ParseModelSpec(modelSpec);
+
+                // Submit planning task to the LLM
+                var planTask = new AgentTask
+                {
+                    AgentType     = AgentType.Generic,
+                    ModelProvider = planProvider,
+                    ModelId       = planModelId,
+                    Description   = planningPromptText,
+                    SourceTag     = prompt.SourceTag ?? $"{prompt.Domain}_planning",
+                    Priority      = 1,
+                    Metadata      = new Dictionary<string, string>
+                    {
+                        ["step_name"]     = step.Name,
+                        ["step_type"]     = "llm_queries",
+                        ["prompt_domain"] = prompt.Domain,
+                        ["prompt_name"]   = prompt.Name,
+                    },
+                };
+                if (!string.IsNullOrEmpty(planEndpoint))
+                    planTask.Metadata["modelEndpoint"] = planEndpoint;
+
+                var planTaskId = await _orchestrator.SubmitTaskAsync(planTask, ct);
+                _logger.LogInformation(
+                    "llm_queries '{Name}': planning task {TaskId} submitted (model: {Model}@{Host})",
+                    step.Name, planTaskId, planModelId, planEndpoint ?? "auto");
+
+                var planResult = await WaitForTaskAsync(planTaskId, ct);
+                var queries    = ParseJsonStringArray(planResult);
+
+                if (queries.Count == 0)
+                {
+                    _logger.LogWarning(
+                        "llm_queries '{Name}': LLM returned no parseable queries. Raw: {Raw}",
+                        step.Name, planResult.Length > 300 ? planResult[..300] + "..." : planResult);
+                    return string.Empty;
+                }
+
+                _logger.LogInformation(
+                    "llm_queries '{Name}': {Count} queries generated — {List}",
+                    step.Name, queries.Count, string.Join("; ", queries));
+
+                // Execute each query via web search
+                var limitStr   = ResolveSimpleTemplate(step.Limit ?? string.Empty, vars);
+                var maxResults = int.TryParse(limitStr, out var lq) && lq > 0 ? lq : 5;
+                var maxQueries = _config.GetValue("SAGIDE:Orchestration:LlmQueriesMaxQueries", 10);
+
+                var sections = new List<string>();
+                foreach (var query in queries.Take(maxQueries))
+                {
+                    _logger.LogDebug("llm_queries '{Name}': searching '{Query}'", step.Name, query);
+                    var searchResult = await _search.SearchAsync(query, maxResults, ct);
+                    if (!string.IsNullOrWhiteSpace(searchResult))
+                        sections.Add($"## Search: {query}\n{searchResult}");
+                }
+
+                return string.Join("\n\n---\n\n", sections);
+            }
+
             default:
                 _logger.LogWarning(
                     "Unknown data_collection step type '{Type}' in step '{Name}'", step.Type, step.Name);
                 return string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Extracts and parses a JSON string array from LLM output.
+    /// Handles output that wraps the array in prose or code fences.
+    /// </summary>
+    private static List<string> ParseJsonStringArray(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return [];
+
+        // Strip markdown code fences if present
+        var text = raw.Trim();
+        if (text.StartsWith("```"))
+        {
+            var fence = text.IndexOf('\n');
+            var closing = text.LastIndexOf("```");
+            if (fence > 0 && closing > fence)
+                text = text[(fence + 1)..closing].Trim();
+        }
+
+        // Find the first '[' ... last ']' in the text (handles prose around the array)
+        var start = text.IndexOf('[');
+        var end   = text.LastIndexOf(']');
+        if (start < 0 || end <= start) return [];
+
+        var json = text[start..(end + 1)];
+        try
+        {
+            return JsonSerializer.Deserialize<List<string>>(json) ?? [];
+        }
+        catch
+        {
+            return [];
         }
     }
 

@@ -1,0 +1,230 @@
+name: weekly-digest
+version: 2
+domain: research
+source_tag: research_weekly
+schedule: "0 9 * * 1"
+
+description: >
+  General-purpose weekly research digest for any topic.
+  Set `topic` and optionally `context` when running to target any research domain —
+  robotics, physics, finance, ML, biology, law, economics, etc.
+
+  The `llm_queries` data collection step asks the orchestrator LLM to generate
+  domain-appropriate search queries (including suitable academic sources for the topic),
+  then executes those queries. The synthesis step picks section headings that fit the domain.
+  No code changes are needed to cover a new research area.
+
+model_preference:
+  orchestrator: workstation
+  subtasks:
+    news_scan:    ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    papers_scan:  ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    tools_scan:   ollama/qwen2.5:3b@localhost
+    # Lightweight model used for planning the search queries
+    planning:     ollama/qwen2.5:3b@localhost
+
+# ── Variables ────────────────────────────────────────────────────────────────
+# Override any of these at runtime via POST /api/prompts/research/weekly-digest/run
+# with body: { "topic": "quantum computing", "context": "...", ... }
+variables:
+  # The research area — the only required customisation
+  topic: "robotics, edge AI, and computer vision"
+
+  # Your background and focus areas; informs relevance judgements in every section
+  context: >
+    I work on computer vision, edge deployment, and multi-camera systems.
+    My stack includes ROS2, OpenCV, PyTorch, and TensorRT.
+
+  # Path to a personal knowledge-base / project notes file (optional)
+  # If the file does not exist the step silently returns empty.
+  context_file: "~/projects/context/RESEARCH_CONTEXT.md"
+
+  # How many results to fetch per search query
+  max_results: "5"
+
+  # Output report goes to ~/reports/{output_subdir}/{date}-weekly.md
+  output_subdir: "research"
+
+# ── Data collection ──────────────────────────────────────────────────────────
+# Step 1: ask a lightweight LLM to generate domain-appropriate search queries,
+#         then execute them all and store combined results in `all_search_results`.
+# Step 2: load the reader's personal context file (optional).
+data_collection:
+  steps:
+    - name: plan_and_search
+      type: llm_queries
+      model: "{{model_preference.subtasks.planning}}"
+      planning_prompt: |
+        You are a research planning assistant building a weekly digest.
+        Topic: {{topic}}
+        Today's date: {{date}}
+
+        Generate exactly 6 targeted web search queries to find high-quality, recent
+        information published within the last 7 days about this topic.
+
+        The 6 queries must cover three categories (2 queries each):
+
+        CATEGORY A — Recent news & announcements:
+          Two queries that find the latest news, product announcements, releases,
+          or industry developments related to "{{topic}}".
+
+        CATEGORY B — Academic papers & research:
+          Two queries that find recent papers. Choose the most appropriate academic
+          source for this domain, for example:
+          - AI / machine learning / robotics → site:arxiv.org OR site:paperswithcode.com
+          - Biomedical / clinical → site:pubmed.ncbi.nlm.nih.gov
+          - Finance / economics → site:ssrn.com OR site:nber.org
+          - Physics / chemistry → site:arxiv.org OR site:nature.com
+          - General / interdisciplinary → site:semanticscholar.org
+          Use the domain-specific source that best matches "{{topic}}".
+
+        CATEGORY C — Tools, frameworks & methods:
+          Two queries that find software tools, libraries, frameworks, datasets,
+          or experimental methods relevant to "{{topic}}".
+
+        Rules:
+        - Tailor every query specifically to "{{topic}}" — no generic filler terms.
+        - Include "{{date}}" or the current year in at least 2 queries for recency.
+        - Output ONLY a valid JSON array of exactly 6 strings. No explanation, no
+          markdown, no code fences around it:
+          ["query1", "query2", "query3", "query4", "query5", "query6"]
+      limit: "{{max_results}}"
+      output_var: all_search_results
+
+    - name: load_personal_context
+      type: read_file
+      source: "{{context_file}}"
+      output_var: personal_context
+
+# ── Subtasks ─────────────────────────────────────────────────────────────────
+# Each subtask receives the combined search results and writes ONE markdown section.
+# Prompts end with the section heading so the LLM anchors its output correctly.
+subtasks:
+  - name: news_scan
+    model: "{{model_preference.subtasks.news_scan}}"
+    input_vars: [all_search_results, personal_context, context]
+    prompt_template: |
+      You are a research analyst preparing one section of a weekly digest.
+      Topic: {{topic}}
+      Reader background: {{context}}
+      Additional context: {{personal_context}}
+
+      SOURCE MATERIAL (combined web search results):
+      {{all_search_results}}
+
+      Write the "Recent Developments" section of the digest.
+      Focus ONLY on news, announcements, product releases, and industry events.
+      Ignore academic papers and tool/framework releases — those go in other sections.
+
+      OUTPUT RULES — FOLLOW EXACTLY:
+      - Output ONLY the markdown section below — nothing else, no commentary, no JSON
+      - Start with the heading line exactly as shown
+      - List 3–5 of the most significant items from the source material
+      - Each bullet: **Item name** — one sentence describing what happened and why it matters, [source link](url) if available
+      - Exclude anything clearly unrelated to {{topic}}
+      - Do NOT include these instructions in your output
+
+      ## Recent Developments
+
+  - name: papers_scan
+    model: "{{model_preference.subtasks.papers_scan}}"
+    input_vars: [all_search_results, context]
+    prompt_template: |
+      You are a research analyst preparing one section of a weekly digest.
+      Topic: {{topic}}
+      Reader background: {{context}}
+
+      SOURCE MATERIAL (combined web search results):
+      {{all_search_results}}
+
+      Write the "Notable Papers" section of the digest.
+      Focus ONLY on academic papers, preprints, and research publications.
+      Ignore news items and software tool releases — those go in other sections.
+
+      OUTPUT RULES — FOLLOW EXACTLY:
+      - Output ONLY the markdown section below — nothing else, no commentary, no JSON
+      - Start with the heading line exactly as shown
+      - List each relevant paper as:
+          **Title** (relevance: high/medium/low) — one-sentence summary. [Link](url)
+      - Omit papers with low relevance or unclear connection to {{topic}}
+      - Do NOT include these instructions in your output
+
+      ## Notable Papers
+
+  - name: tools_scan
+    model: "{{model_preference.subtasks.tools_scan}}"
+    input_vars: [all_search_results, personal_context, context]
+    prompt_template: |
+      You are a research analyst preparing one section of a weekly digest.
+      Topic: {{topic}}
+      Reader background: {{context}}
+      Additional context: {{personal_context}}
+
+      SOURCE MATERIAL (combined web search results):
+      {{all_search_results}}
+
+      Write a tools/frameworks/resources section of the digest.
+      Focus ONLY on software tools, libraries, frameworks, datasets, and methods.
+      Ignore news and academic papers — those go in other sections.
+
+      OUTPUT RULES — FOLLOW EXACTLY:
+      - Output ONLY the markdown section — nothing else, no commentary, no JSON
+      - Choose the most fitting heading for this domain, e.g.:
+          "## Tools & Frameworks" for engineering topics
+          "## Instruments & Methods" for experimental science
+          "## Data Sources & Platforms" for data science
+          "## Key Resources" for general research
+      - Bullet points: **Name** — what it is / what changed / why it matters. [Link](url) if available
+      - Do NOT include these instructions in your output
+
+# ── Synthesis ─────────────────────────────────────────────────────────────────
+# Receives three pre-formatted markdown sections.
+# Chooses domain-appropriate headings, adds Executive Summary, Action Items, References.
+synthesis:
+  prompt_template: |
+    You are assembling a weekly research digest for the topic: {{topic}}
+    Date: {{date}}
+    Reader background: {{context}}
+
+    You have three pre-written markdown sections from analysis subtasks.
+    READ THEM CAREFULLY — they are your input data.
+
+    <<<SECTION: RECENT DEVELOPMENTS>>>
+    {{news_scan_result}}
+    <<<END>>>
+
+    <<<SECTION: NOTABLE PAPERS>>>
+    {{papers_scan_result}}
+    <<<END>>>
+
+    <<<SECTION: TOOLS/RESOURCES>>>
+    {{tools_scan_result}}
+    <<<END>>>
+
+    INSTRUCTIONS:
+    1. Write a complete weekly digest in clean Markdown.
+    2. Begin immediately with the title heading — no preamble, no meta-commentary.
+    3. Choose 2–4 section headings that are most natural for the topic "{{topic}}".
+       Examples:
+         - Robotics: Hardware | Software | Research
+         - Physics: Theory | Experiments | Applications
+         - Machine Learning: Models | Tooling | Benchmarks
+         - Biology: Discoveries | Methods | Clinical
+         - Finance: Markets | Research | Tools
+       Do NOT use generic headings — pick ones that fit "{{topic}}".
+    4. Redistribute the three sections under your chosen headings.
+    5. Add "## Executive Summary" at the top with 2–3 sentences covering the week's highlights.
+    6. Add "## Action Items" near the end — numbered list of concrete things to do or investigate.
+    7. Add "## References" as the very last section — collect ALL hyperlinks from all three
+       sections into a numbered list formatted as: N. [Title or description](url)
+
+    STRICT OUTPUT RULES:
+    - Output ONLY Markdown — no JSON, no code fences, no <<<...>>> markers
+    - Do NOT reproduce these instructions in your output
+    - Do NOT write "Generate a weekly briefing" or any other meta-text
+    - Every URL from the input sections must appear in References exactly once
+
+output:
+  format: markdown
+  destination: "~/reports/{{output_subdir}}/{{date}}-weekly.md"
+  notify: true

@@ -7,11 +7,20 @@ namespace SAGIDE.Service.Orchestrator;
 /// Resolves {{}} template variables in workflow step prompts.
 /// Supports:
 ///   {{param_name}}         — value from user-supplied InputContext
-///   {{step_id.output}}     — raw LLM output from a prior step (truncated to 4000 chars)
+///   {{step_id.output}}     — raw LLM output from a prior step (truncated to MaxOutputChars)
+/// MaxOutputChars is configurable via SAGIDE:Orchestration:MaxStepOutputChars (default 4000).
+/// Set once at startup via <see cref="Configure"/>.
 /// </summary>
 public static partial class PromptTemplateEngine
 {
-    private const int MaxOutputChars = 4000;
+    /// <summary>
+    /// Maximum characters of step output included in {{step_id.output}} substitutions.
+    /// Set once at application startup from IConfiguration; thread-safe for reads after init.
+    /// </summary>
+    public static int MaxOutputChars { get; set; } = 4000;
+
+    /// <summary>Applies configuration values. Call once from Program.cs after building config.</summary>
+    public static void Configure(int maxOutputChars) => MaxOutputChars = maxOutputChars;
 
     public static string Resolve(
         string template,

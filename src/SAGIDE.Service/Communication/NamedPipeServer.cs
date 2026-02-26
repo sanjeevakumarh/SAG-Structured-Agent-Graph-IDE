@@ -23,6 +23,13 @@ public class NamedPipeServer
     private readonly Channel<PipeMessage> _broadcastChannel;
     private CancellationTokenSource? _cts;
 
+    /// <summary>
+    /// Total number of broadcast messages silently dropped due to a full channel (DropOldest policy).
+    /// Non-zero values indicate the service is under back-pressure. Exposed via /api/health.
+    /// </summary>
+    public long DroppedMessageCount => Interlocked.Read(ref _droppedMessageCount);
+    private long _droppedMessageCount;
+
     // Matches TypeScript client: camelCase properties, string enums, byte[] as base64 string
     internal static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -228,7 +235,12 @@ public class NamedPipeServer
     public Task BroadcastAsync(PipeMessage message, CancellationToken ct = default)
     {
         if (!_broadcastChannel.Writer.TryWrite(message))
-            _logger.LogWarning("Broadcast channel full; dropped oldest message (type={Type})", message.Type);
+        {
+            Interlocked.Increment(ref _droppedMessageCount);
+            _logger.LogWarning(
+                "Broadcast channel full; dropped oldest message (type={Type}, total dropped={Count})",
+                message.Type, DroppedMessageCount);
+        }
         return Task.CompletedTask;
     }
 

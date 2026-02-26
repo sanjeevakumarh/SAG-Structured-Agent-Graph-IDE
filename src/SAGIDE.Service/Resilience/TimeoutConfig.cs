@@ -4,31 +4,31 @@ namespace SAGIDE.Service.Resilience;
 
 public class TimeoutConfig
 {
-    public int NamedPipeRequestMs { get; init; } = 7_200_000;
-    public int HealthCheckMs { get; init; } = 7_200_000;
+    public int NamedPipeRequestMs { get; init; } = 300_000;
+    public int HealthCheckMs { get; init; } = 5_000;
     public int PipeReconnectMs { get; init; } = 3_000;
-    public int PipeReconnectMaxMs { get; init; } = 7_200_000;
-    public int TaskExecutionMs { get; init; } = 7_200_000;
+    public int PipeReconnectMaxMs { get; init; } = 30_000;
+    public int TaskExecutionMs { get; init; } = 300_000;
 
     /// <summary>
     /// If no streaming chunk is received within this window, the stream is cancelled.
     /// Protects against stalled connections that hold a slot indefinitely.
     /// </summary>
-    public int StreamingIdleTimeoutMs { get; init; } = 7_200_000;
+    public int StreamingIdleTimeoutMs { get; init; } = 300_000;
 
     public TimeSpan StreamingIdleTimeout => TimeSpan.FromMilliseconds(StreamingIdleTimeoutMs);
 
     public Dictionary<string, int> Providers { get; init; } = new()
     {
-        ["Claude"] = 7_200_000,
-        ["Codex"] = 7_200_000,
-        ["Gemini"] = 7_200_000,
-        ["Ollama"] = 7_200_000
+        ["Claude"] = 300_000,
+        ["Codex"] = 300_000,
+        ["Gemini"] = 300_000,
+        ["Ollama"] = 1_800_000,   // local models can be slow; keep generous
     };
 
     public int GetProviderTimeoutMs(ModelProvider provider)
     {
-        return Providers.TryGetValue(provider.ToString(), out var ms) ? ms : 7_200_000;
+        return Providers.TryGetValue(provider.ToString(), out var ms) ? ms : 300_000;
     }
 
     public TimeSpan TaskExecutionTimeout => TimeSpan.FromMilliseconds(TaskExecutionMs);

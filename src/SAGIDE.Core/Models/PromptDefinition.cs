@@ -76,7 +76,7 @@ public class PromptDataCollectionStep
 {
     public string Name { get; set; } = string.Empty;
 
-    /// <summary>Step type: read_file | web_api | web_api_batch | filter | web_search_batch</summary>
+    /// <summary>Step type: read_file | web_api | web_api_batch | filter | web_search_batch | llm_queries</summary>
     public string Type { get; set; } = string.Empty;
 
     /// <summary>URL or file path (may contain {{template}} expressions).</summary>
@@ -99,6 +99,21 @@ public class PromptDataCollectionStep
 
     /// <summary>Name of the variable to store this step's output in.</summary>
     public string OutputVar { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Prompt template for <c>llm_queries</c> steps.
+    /// The LLM receives this rendered text and must return a JSON array of search query strings.
+    /// Those queries are then executed via the web search adapter and results are combined.
+    /// </summary>
+    public string? PlanningPrompt { get; set; }
+
+    /// <summary>
+    /// Model spec for the <c>llm_queries</c> planning call
+    /// (e.g. "ollama/qwen2.5:3b@localhost").
+    /// Falls back to <c>model_preference.orchestrator</c> when omitted.
+    /// Supports <c>{{template}}</c> expressions (e.g. "{{model_preference.subtasks.planning}}").
+    /// </summary>
+    public string? Model { get; set; }
 }
 
 // ── Subtask ────────────────────────────────────────────────────────────────────
