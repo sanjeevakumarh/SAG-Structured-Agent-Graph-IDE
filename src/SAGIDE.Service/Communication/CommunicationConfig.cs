@@ -34,6 +34,17 @@ public class CommunicationConfig
     /// </summary>
     public int MaxBroadcastQueueSize { get; set; } = 10_000;
 
+    // ── Broadcast filtering ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// When true, ALL task updates and streaming output (including tasks submitted via
+    /// REST API) are broadcast to connected pipe clients (VSCode). Useful for debugging
+    /// workflow execution in the VSCode streaming panel.
+    /// When false (default), only tasks submitted BY a pipe client are routed back to
+    /// that client; REST-originated tasks are not forwarded to VSCode.
+    /// </summary>
+    public bool BroadcastAllTasks { get; set; }
+
     // ── Authentication ────────────────────────────────────────────────────────
 
     /// <summary>

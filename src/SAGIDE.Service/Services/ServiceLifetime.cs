@@ -19,6 +19,7 @@ public class ServiceLifetime : BackgroundService
         NamedPipeServer    pipeServer,
         AgentOrchestrator  orchestrator,
         WorkflowEngine     workflowEngine,
+        CommunicationConfig commConfig,
         IEventBus          eventBus,
         ILogger<ServiceLifetime> logger)
     {
@@ -30,7 +31,9 @@ public class ServiceLifetime : BackgroundService
         // A6: Subscribe via the event bus — each handler runs independently;
         // an exception in one handler will not prevent others from executing.
 
-        // Broadcast every task-status change to all connected VSCode clients.
+        // Route task-status changes to the pipe client that owns the task.
+        // When BroadcastAllTasks is true (debug mode), all updates go to all clients —
+        // useful for watching REST-submitted workflow execution in VSCode's streaming panel.
         eventBus.Subscribe<TaskUpdatedEvent>(e =>
         {
             var msg = new PipeMessage
@@ -38,11 +41,22 @@ public class ServiceLifetime : BackgroundService
                 Type    = MessageTypes.TaskUpdate,
                 Payload = JsonSerializer.SerializeToUtf8Bytes(e.Status, NamedPipeServer.JsonOptions),
             };
-            _ = _pipeServer.BroadcastAsync(msg);
+
+            if (commConfig.BroadcastAllTasks)
+            {
+                _ = _pipeServer.BroadcastAsync(msg);
+                return;
+            }
+
+            // Only forward to the pipe client that submitted this task
+            var clientId = _pipeServer.GetTaskOwner(e.Status.TaskId);
+            if (clientId is not null)
+                _ = _pipeServer.SendToClientAsync(clientId, msg);
+            // else: REST-originated task — don't send to VSCode
         });
 
-        // Route streaming output only to the VS Code window that submitted the task.
-        // Other windows should not receive (and auto-open panels for) unrelated tasks.
+        // Route streaming output to the pipe client that submitted the task.
+        // When BroadcastAllTasks is true, unowned tasks also go to all clients.
         eventBus.Subscribe<StreamingOutputEvent>(e =>
         {
             var msg = new PipeMessage
@@ -53,8 +67,9 @@ public class ServiceLifetime : BackgroundService
             var clientId = _pipeServer.GetTaskOwner(e.Message.TaskId);
             if (clientId is not null)
                 _ = _pipeServer.SendToClientAsync(clientId, msg);
-            else
-                _ = _pipeServer.BroadcastAsync(msg);  // fallback for workflow-submitted tasks
+            else if (commConfig.BroadcastAllTasks)
+                _ = _pipeServer.BroadcastAsync(msg);
+            // else: REST-originated task — don't send to VSCode
         });
 
         // Broadcast workflow instance updates (step completions, status changes).

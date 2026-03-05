@@ -73,19 +73,34 @@ public class OllamaHostHealthMonitorTests
         Assert.Equal(Host2.TrimEnd('/'), result);
     }
 
-    // ── Rule 3: preferred unreachable, no warm host, but any reachable ────────
+    // ── Rule 3: preferred unreachable, no warm host, model installed ──────────
 
     [Fact]
-    public void NoWarmHost_AnyReachable_ReturnsThatHost()
+    public void NoWarmHost_ModelInstalled_ReturnsThatHost()
     {
         var mon = Make(Host1, Host2, Host3);
         mon.SimulateHostState(Host1, isReachable: false, loadedModels: []);
         mon.SimulateHostState(Host2, isReachable: false, loadedModels: []);
-        mon.SimulateHostState(Host3, isReachable: true,  loadedModels: []);  // reachable but cold
+        // Host3 reachable, model installed but not loaded in VRAM
+        mon.SimulateHostState(Host3, isReachable: true, loadedModels: [],
+            installedModels: ["llama3:8b"]);
 
         var result = mon.TryGetBestHost("llama3:8b", Host1, [Host1, Host2, Host3]);
 
         Assert.Equal(Host3.TrimEnd('/'), result);
+    }
+
+    [Fact]
+    public void NoWarmHost_ModelNotInstalled_ReturnsNull()
+    {
+        var mon = Make(Host1, Host2, Host3);
+        mon.SimulateHostState(Host1, isReachable: false, loadedModels: []);
+        mon.SimulateHostState(Host2, isReachable: false, loadedModels: []);
+        mon.SimulateHostState(Host3, isReachable: true, loadedModels: []);  // reachable, no model
+
+        var result = mon.TryGetBestHost("llama3:8b", Host1, [Host1, Host2, Host3]);
+
+        Assert.Null(result);
     }
 
     // ── Rule 4: all unreachable → null ────────────────────────────────────────

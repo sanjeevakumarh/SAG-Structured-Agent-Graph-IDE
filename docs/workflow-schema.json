@@ -1,0 +1,250 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sagide/schemas/workflow-schema.json",
+  "title": "SAGIDE Workflow Definition",
+  "description": "Schema for workflow YAML files loaded by WorkflowDefinitionLoader.",
+  "type": "object",
+  "required": ["name", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Human-readable workflow name.",
+      "examples": ["Full Feature Pipeline", "Review-Fix Loop"]
+    },
+    "description": {
+      "type": "string",
+      "description": "What this workflow does."
+    },
+    "parameters": {
+      "type": "array",
+      "description": "Input parameters the user fills in at launch time. Accessible in step prompts via {{param_name}}.",
+      "items": { "$ref": "#/$defs/Parameter" }
+    },
+    "steps": {
+      "type": "array",
+      "description": "Ordered list of workflow steps. Execution order is determined by depends_on, not list position.",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/Step" }
+    },
+    "convergence_policy": {
+      "$ref": "#/$defs/ConvergencePolicy",
+      "description": "Required when the workflow contains feedback loops (next: back-edges). Defines max iterations and escalation."
+    }
+  },
+
+  "$defs": {
+    "Parameter": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Parameter name. Accessible in prompts as {{name}}."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["string", "integer", "int", "boolean", "bool", "number", "float"],
+          "default": "string",
+          "description": "Data type for documentation purposes. All values are passed as strings at runtime."
+        },
+        "default": {
+          "type": "string",
+          "description": "Default value used when the user does not supply one."
+        }
+      }
+    },
+
+    "Step": {
+      "type": "object",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique step identifier within this workflow. Used in depends_on, next, and output references ({{step_id.output}}).",
+          "examples": ["generate_code", "code_review", "check_quality"]
+        },
+        "type": {
+          "type": "string",
+          "enum": ["agent", "router", "tool", "constraint", "context_retrieval", "human_approval", "workspace_setup", "workspace_teardown"],
+          "default": "agent",
+          "description": "Step type. 'agent' submits an AI task; 'router' branches conditionally; 'tool' runs a shell command; 'constraint' evaluates an expression; 'context_retrieval' aggregates step outputs; 'human_approval' pauses for user decision."
+        },
+        "depends_on": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Step IDs that must complete successfully before this step can run. Parallel execution is automatic when multiple steps share the same depends_on.",
+          "default": []
+        },
+
+        "agent": {
+          "type": "string",
+          "description": "Agent type for 'agent' steps (case-insensitive). One of: Coder/CodeGenerator/Generator, Reviewer/CodeReviewer, Tester/UnitTester, Security/SecurityReviewer, Documenter/Documentation, Debug/Debugger.",
+          "examples": ["Coder", "Reviewer", "Tester", "Security", "Documenter", "Debug"]
+        },
+        "prompt": {
+          "type": "string",
+          "description": "Scriban prompt template for 'agent' steps. Supports {{param_name}} and {{step_id.output}} substitution."
+        },
+        "model_id": {
+          "type": "string",
+          "description": "Override model ID for this step (e.g. 'claude-sonnet-4-6'). Overrides the default model selected at launch.",
+          "examples": ["claude-sonnet-4-6", "qwen2.5-coder:7b-instruct"]
+        },
+        "model_provider": {
+          "type": "string",
+          "description": "Override provider for this step.",
+          "enum": ["claude", "codex", "gemini", "ollama"]
+        },
+        "next": {
+          "type": "string",
+          "description": "Step ID to loop back to after this step completes (feedback loop). Requires convergence_policy at the workflow level."
+        },
+        "max_iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1,
+          "description": "Maximum loop iterations when 'next' is set. 1 = no looping."
+        },
+
+        "branches": {
+          "type": "array",
+          "description": "Conditional branches for 'router' steps. Evaluated in order; first match wins.",
+          "items": { "$ref": "#/$defs/RouterBranch" }
+        },
+
+        "command": {
+          "type": "string",
+          "description": "Shell command for 'tool' steps (e.g. 'dotnet build', 'npm test')."
+        },
+        "working_dir": {
+          "type": "string",
+          "description": "Working directory for the command. Defaults to the workflow workspace path."
+        },
+        "exit_code_policy": {
+          "type": "string",
+          "enum": ["FAIL_ON_NONZERO", "WARN_ON_NONZERO", "IGNORE"],
+          "default": "FAIL_ON_NONZERO",
+          "description": "How non-zero exit codes are handled."
+        },
+        "timeout_sec": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Per-step wall-clock timeout in seconds for 'tool' steps. 0 = no timeout."
+        },
+
+        "constraint_expr": {
+          "type": "string",
+          "description": "Expression for 'constraint' steps. Examples: 'exit_code(build) == 0', 'issue_count(review) == 0', 'output(review).contains(\"PASS\")'."
+        },
+        "on_constraint_fail": {
+          "type": "string",
+          "enum": ["fail", "warn"],
+          "default": "fail",
+          "description": "Action when the constraint expression is false."
+        },
+
+        "context_var_name": {
+          "type": "string",
+          "description": "Variable name set by 'context_retrieval' steps. Available in downstream prompts as {{context_var_name}}."
+        },
+        "source_steps": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Step IDs whose outputs are concatenated into context_var_name (for 'context_retrieval' steps)."
+        },
+
+        "sla_hours": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Hours before the approval SLA is breached (for 'human_approval' steps). 0 = no timeout."
+        },
+        "timeout_action": {
+          "type": "string",
+          "enum": ["cancel", "dlq"],
+          "default": "cancel",
+          "description": "Action on SLA breach: cancel the workflow or send it to the dead-letter queue."
+        },
+        "approval_prompt": {
+          "type": "string",
+          "description": "Human-readable prompt shown in the approval UI. Supports {{step_id.output}} template variables."
+        },
+
+        "shadow_branch": {
+          "type": "string",
+          "default": "HEAD",
+          "description": "Git ref to snapshot when provisioning a shadow worktree (for 'workspace_setup' steps)."
+        },
+        "shadow_action": {
+          "type": "string",
+          "enum": ["promote", "destroy"],
+          "default": "promote",
+          "description": "Action on 'workspace_teardown': promote applies the shadow diff to the real workspace; destroy discards it."
+        }
+      }
+    },
+
+    "RouterBranch": {
+      "type": "object",
+      "required": ["condition", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "condition": {
+          "type": "string",
+          "description": "Condition expression evaluated against the preceding step's result. Built-in: 'hasIssues', 'success', 'failed'. String match: 'output.contains(\"text\")'.",
+          "examples": ["hasIssues", "success", "failed", "output.contains(\"PASS\")"]
+        },
+        "target": {
+          "type": "string",
+          "description": "Step ID to activate when this condition is true."
+        }
+      }
+    },
+
+    "ConvergencePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Governs feedback loops. Required when any step has a 'next' back-edge.",
+      "properties": {
+        "max_iterations": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 3,
+          "description": "Maximum refactor→validate cycles before escalation."
+        },
+        "escalation_target": {
+          "type": "string",
+          "enum": ["CANCEL", "DLQ", "HUMAN_APPROVAL"],
+          "default": "CANCEL",
+          "description": "Action when max_iterations is exceeded. HUMAN_APPROVAL pauses the workflow and pushes a notification."
+        },
+        "partial_retry_scope": {
+          "type": "string",
+          "enum": ["FAILING_NODES_ONLY", "FROM_CODEGEN", "FULL_WORKFLOW"],
+          "default": "FAILING_NODES_ONLY",
+          "description": "Which steps to retry on each iteration."
+        },
+        "convergence_hint_memory": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, hints from prior iterations are injected into refactor prompts to aid convergence."
+        },
+        "timeout_per_iteration_sec": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Wall-clock timeout per iteration in seconds. 0 = unlimited."
+        },
+        "contradiction_detection": {
+          "type": "boolean",
+          "default": true,
+          "description": "Immediately escalate to HUMAN_APPROVAL if issues fail to decrease between iterations, indicating mutually exclusive constraints."
+        }
+      }
+    }
+  }
+}

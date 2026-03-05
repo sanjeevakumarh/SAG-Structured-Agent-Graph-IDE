@@ -690,18 +690,22 @@ public class AgentOrchestrator : ITaskSubmissionService
         if (!string.IsNullOrEmpty(currentEndpoint))
             triedSet.Add(currentEndpoint);
 
-        // Select the next healthy host, preferring servers not already busy with
-        // sibling workflow steps to avoid resource contention / circular waiting.
+        // Select the next healthy host that has the required model installed.
+        // Prefers servers not already busy with sibling workflow steps to avoid
+        // resource contention / circular waiting.
         string? nextEndpoint = null;
         if (_ollamaMonitor is not null)
         {
+            var bareModelId = StripMachineSuffix(task.ModelId);
             var sameWorkflowHosts = GetSameWorkflowHosts(task);
-            var candidates = _ollamaMonitor.GetAllReachableHosts()
+
+            // Only consider hosts that have the model installed — avoids 404s on failover.
+            var candidates = _ollamaMonitor.GetReachableHostsWithModel(bareModelId)
                 .Select(u => u.TrimEnd('/'))
                 .Where(u => !triedSet.Contains(u))
                 .ToList();
 
-            // Prefer hosts without same-workflow tasks; fall back to any available candidate.
+            // Prefer hosts without same-workflow tasks; fall back to any with the model.
             nextEndpoint = candidates.FirstOrDefault(c => !sameWorkflowHosts.Contains(c))
                         ?? candidates.FirstOrDefault();
         }
@@ -1032,6 +1036,7 @@ public class AgentOrchestrator : ITaskSubmissionService
             Result = result,
             ScheduledFor = task.ScheduledFor,
             ComparisonGroupId = task.ComparisonGroupId,
+            SourceTag = task.SourceTag,
         };
     }
 

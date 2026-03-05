@@ -48,10 +48,10 @@ sequenceDiagram
 - ProviderFactory routes tasks to 4 HTTP providers (Claude, Codex, Gemini), Ollama, or TensorRT-LLM with affinity-based server selection.
 
 ## Updates (2026-03-05)
-- VS Code Skill Library — new tree view backed by /api/skills with domain grouping, tooltips, and live refresh on skills/*.yaml changes.
-- Skills/prompt guardrails — added SkillRegistry integrity tests, workflow expander/rendering integration suites, prompt template deep-key coverage, and skill graph API tests using deterministic YAML fixtures.
-- Orchestrator/workflow hardening — model-id validation and DLQ assertions in AgentOrchestrator, expanded workflow loop/recovery/step-evaluator cases, plus prompt builder and llm data-collection execution tests.
-- Tooling and data — build-all.ps1 gains optional client builds; finance.stock-analysis sample inputs added; environment alias allowlist documented in tests.
+- Workflow schema docs — published docs/workflow-schema.json describing workflow YAML structure (steps, parameters, convergence policy).
+- Pipe broadcast controls — new BroadcastAllTasks toggle in CommunicationConfig/appsettings with event-bus routing to limit VS Code updates to task owners.
+- Ollama routing resilience — host monitor now tracks installed models and failover only selects servers that have the model; tests cover warm/installed/absent cases.
+- Task metadata plumbing — task status DTOs carry SourceTag; AgentOrchestrator failover uses installed-model-aware host selection.
 
 ## Updates (2026-02-28)
 - Observability and DI cleanup — Added /api/metrics with cumulative counts and gauges, centralized DI setup via AddSagide* extension methods, and enabled OpenAPI export for development.

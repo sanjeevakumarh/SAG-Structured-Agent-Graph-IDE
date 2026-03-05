@@ -17,4 +17,5 @@ public class TaskStatusResponse
     public AgentResult? Result { get; set; }
     public DateTime? ScheduledFor { get; set; }
     public string? ComparisonGroupId { get; set; }
+    public string? SourceTag { get; set; }
 }

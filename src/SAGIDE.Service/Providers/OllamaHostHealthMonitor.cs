@@ -27,6 +27,7 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
     private sealed record HostState(
         bool IsReachable,
         IReadOnlyList<string> LoadedModels,
+        IReadOnlyList<string> InstalledModels,
         DateTime LastSeen);
 
     public OllamaHostHealthMonitor(
@@ -40,7 +41,7 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
 
         // Initialize all hosts as unknown until the first poll
         foreach (var url in _allUrls)
-            _state[url] = new HostState(false, [], DateTime.MinValue);
+            _state[url] = new HostState(false, [], [], DateTime.MinValue);
     }
 
     // ── BackgroundService ─────────────────────────────────────────────────────
@@ -96,23 +97,35 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
             return warmHost;
         }
 
-        // rule 3: any reachable candidate
-        var anyReachable = list.FirstOrDefault(url =>
-            _state.TryGetValue(url, out var s) && s.IsReachable);
-        if (anyReachable is not null)
+        // rule 3: pick a reachable host that has the model installed (can load it)
+        var installedHost = list.FirstOrDefault(url =>
+            _state.TryGetValue(url, out var s) && s.IsReachable &&
+            s.InstalledModels.Contains(modelId, StringComparer.OrdinalIgnoreCase));
+        if (installedHost is not null)
         {
             _logger.LogInformation(
-                "OllamaHealthMonitor: routing {Model} to fallback host {Server} (preferred {Pref} unreachable, no warm host)",
+                "OllamaHealthMonitor: routing {Model} to host {Server} (model installed, preferred {Pref} unreachable)",
                 modelId,
-                _aliasResolver?.GetAlias(anyReachable) ?? anyReachable,
+                _aliasResolver?.GetAlias(installedHost) ?? installedHost,
                 _aliasResolver?.GetAlias(preferredUrl) ?? preferredUrl);
+            return installedHost;
         }
-        return anyReachable;
+
+        // rule 4: no reachable host has the model — return null so caller backs off
+        _logger.LogWarning(
+            "OllamaHealthMonitor: no reachable host has model {Model} installed (preferred {Pref} unreachable)",
+            modelId, _aliasResolver?.GetAlias(preferredUrl) ?? preferredUrl);
+        return null;
     }
 
     /// <summary>Returns all Ollama base URLs that were reachable on the last poll.</summary>
     public IReadOnlyList<string> GetAllReachableHosts()
         => _allUrls.Where(u => _state.TryGetValue(u, out var s) && s.IsReachable).ToList();
+
+    /// <summary>Returns reachable hosts that have the specified model installed.</summary>
+    public IReadOnlyList<string> GetReachableHostsWithModel(string modelId)
+        => _allUrls.Where(u => _state.TryGetValue(u, out var s) && s.IsReachable &&
+            s.InstalledModels.Contains(modelId, StringComparer.OrdinalIgnoreCase)).ToList();
 
     /// <summary>Returns true if the given server was reachable on the last poll.</summary>
     public bool IsReachable(string baseUrl)
@@ -122,12 +135,18 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
     public IReadOnlyList<string> GetLoadedModels(string baseUrl)
         => _state.TryGetValue(baseUrl.TrimEnd('/'), out var s) ? s.LoadedModels : [];
 
+    /// <summary>Returns all models installed (available via /api/tags) on the given server.</summary>
+    public IReadOnlyList<string> GetInstalledModels(string baseUrl)
+        => _state.TryGetValue(baseUrl.TrimEnd('/'), out var s) ? s.InstalledModels : [];
+
     /// <summary>
     /// Test seam: directly sets the observed state for a host without performing an HTTP poll.
     /// Only used by unit tests via <c>[assembly: InternalsVisibleTo("SAGIDE.Service.Tests")]</c>.
     /// </summary>
-    internal void SimulateHostState(string baseUrl, bool isReachable, IReadOnlyList<string> loadedModels)
-        => _state[baseUrl.TrimEnd('/')] = new HostState(isReachable, loadedModels, DateTime.UtcNow);
+    internal void SimulateHostState(string baseUrl, bool isReachable,
+        IReadOnlyList<string> loadedModels, IReadOnlyList<string>? installedModels = null)
+        => _state[baseUrl.TrimEnd('/')] = new HostState(
+            isReachable, loadedModels, installedModels ?? loadedModels, DateTime.UtcNow);
 
     // ── Private polling ───────────────────────────────────────────────────────
 
@@ -139,50 +158,69 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
         try
         {
             using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            var response = await client.GetAsync($"{baseUrl}/api/ps", ct);
 
+            // Poll /api/ps for VRAM-loaded models
+            var response = await client.GetAsync($"{baseUrl}/api/ps", ct);
             if (!response.IsSuccessStatusCode)
             {
-                _state[baseUrl] = new HostState(false, [], DateTime.UtcNow);
+                _state[baseUrl] = new HostState(false, [], [], DateTime.UtcNow);
                 return;
             }
 
-            var json    = await response.Content.ReadAsStringAsync(ct);
-            var doc     = JsonDocument.Parse(json);
-            var models  = new List<string>();
+            var loadedModels = ParseModelNames(await response.Content.ReadAsStringAsync(ct));
 
-            if (doc.RootElement.TryGetProperty("models", out var modelsEl))
+            // Poll /api/tags for all installed models (available to load)
+            var installedModels = new List<string>();
+            try
             {
-                foreach (var m in modelsEl.EnumerateArray())
-                {
-                    if (m.TryGetProperty("name", out var nameEl) &&
-                        nameEl.GetString() is { Length: > 0 } name)
-                        models.Add(name);
-                }
+                var tagsResp = await client.GetAsync($"{baseUrl}/api/tags", ct);
+                if (tagsResp.IsSuccessStatusCode)
+                    installedModels = ParseModelNames(await tagsResp.Content.ReadAsStringAsync(ct));
+            }
+            catch
+            {
+                // /api/tags failure is non-fatal — we still have /api/ps data
             }
 
             var wasReachable = _state.TryGetValue(baseUrl, out var prev) && prev.IsReachable;
-            _state[baseUrl] = new HostState(true, models, DateTime.UtcNow);
+            _state[baseUrl] = new HostState(true, loadedModels, installedModels, DateTime.UtcNow);
 
             var serverLabel = _aliasResolver?.GetAlias(baseUrl) ?? baseUrl;
             if (!wasReachable)
                 _logger.LogInformation(
-                    "Ollama {Server} is now reachable ({Count} model(s) loaded: {Models})",
-                    serverLabel, models.Count, string.Join(", ", models));
+                    "Ollama {Server} is now reachable ({Loaded} loaded, {Installed} installed)",
+                    serverLabel, loadedModels.Count, installedModels.Count);
             else
                 _logger.LogDebug(
-                    "Ollama {Server}: {Count} model(s) in VRAM: {Models}",
-                    serverLabel, models.Count, string.Join(", ", models));
+                    "Ollama {Server}: {Loaded} in VRAM, {Installed} installed",
+                    serverLabel, loadedModels.Count, installedModels.Count);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             var wasReachable = _state.TryGetValue(baseUrl, out var prev) && prev.IsReachable;
-            _state[baseUrl] = new HostState(false, [], DateTime.UtcNow);
+            _state[baseUrl] = new HostState(false, [], [], DateTime.UtcNow);
             var serverLabel = _aliasResolver?.GetAlias(baseUrl) ?? baseUrl;
             if (wasReachable)
                 _logger.LogWarning("Ollama {Server} became unreachable: {Msg}", serverLabel, ex.Message);
             else
                 _logger.LogDebug("Ollama {Server}: unreachable ({Msg})", serverLabel, ex.Message);
         }
+    }
+
+    private static List<string> ParseModelNames(string json)
+    {
+        var models = new List<string>();
+        var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.TryGetProperty("models", out var modelsEl))
+        {
+            foreach (var m in modelsEl.EnumerateArray())
+            {
+                // /api/ps uses "name", /api/tags uses "name" (both have it)
+                if (m.TryGetProperty("name", out var nameEl) &&
+                    nameEl.GetString() is { Length: > 0 } name)
+                    models.Add(name);
+            }
+        }
+        return models;
     }
 }
