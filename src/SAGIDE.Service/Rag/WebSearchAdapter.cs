@@ -22,13 +22,15 @@ public sealed class WebSearchAdapter
 
     // In-memory query cache: query → (result, fetchedAt)
     private readonly Dictionary<string, (string result, DateTime fetchedAt)> _cache = [];
-    private readonly TimeSpan _cacheTtl = TimeSpan.FromMinutes(30);
+    private readonly TimeSpan _cacheTtl;
 
     public WebSearchAdapter(HttpClient http, IConfiguration configuration, ILogger<WebSearchAdapter> logger)
     {
         _http       = http;
         _searchUrls = ResolveSearchUrls(configuration);
         _logger     = logger;
+        var minutes = configuration.GetValue("SAGIDE:Caching:SearchCacheTtlMinutes", 30);
+        _cacheTtl   = minutes > 0 ? TimeSpan.FromMinutes(minutes) : TimeSpan.Zero;
     }
 
     /// <summary>
@@ -88,9 +90,10 @@ public sealed class WebSearchAdapter
             return string.Empty;
         }
 
-        // Cache hit
+        // Cache hit (skip when TTL is zero — caching disabled)
         var cacheKey = $"{query}|{maxResults}";
-        if (_cache.TryGetValue(cacheKey, out var cached)
+        if (_cacheTtl > TimeSpan.Zero
+            && _cache.TryGetValue(cacheKey, out var cached)
             && DateTime.UtcNow - cached.fetchedAt < _cacheTtl)
         {
             return cached.result;

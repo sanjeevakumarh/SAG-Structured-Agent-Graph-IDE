@@ -114,9 +114,11 @@ public static class ServiceCollectionExtensions
         var aliasResolver = new EndpointAliasResolver(cfg);
         services.AddSingleton(aliasResolver);
 
+        var healthPollSec = cfg.GetValue("SAGIDE:Caching:HealthPollIntervalSeconds", 30);
         var ollamaUrls    = CollectOllamaBaseUrls(cfg);
         var ollamaMonitor = new OllamaHostHealthMonitor(
-            ollamaUrls, loggerFactory.CreateLogger<OllamaHostHealthMonitor>(), aliasResolver);
+            ollamaUrls, loggerFactory.CreateLogger<OllamaHostHealthMonitor>(), aliasResolver,
+            healthPollSec);
         services.AddSingleton(ollamaMonitor);
         services.AddHostedService(_ => ollamaMonitor);
 
@@ -197,7 +199,8 @@ public static class ServiceCollectionExtensions
             sp.GetService<Providers.OllamaHostHealthMonitor>(),
             sp.GetService<IModelPerfRepository>(),
             sp.GetService<EndpointAliasResolver>(),
-            sp.GetService<QualitySampler>()));
+            sp.GetService<QualitySampler>(),
+            sp.GetService<CachingConfig>()));
         services.AddSingleton<ITaskSubmissionService>(sp => sp.GetRequiredService<AgentOrchestrator>());
 
         services.AddSingleton<WorkflowDefinitionLoader>();
@@ -217,11 +220,13 @@ public static class ServiceCollectionExtensions
         var routingConfig = new RoutingConfig();
         cfg.GetSection("SAGIDE:Routing").Bind(routingConfig);
         services.AddSingleton(routingConfig);
+        var routingHintsTtl = cfg.GetValue("SAGIDE:Caching:RoutingHintsTtlSeconds", 60);
         services.AddSingleton<ModelRoutingHints>(sp => new ModelRoutingHints(
             sp.GetService<IModelPerfRepository>(),
             sp.GetRequiredService<EndpointAliasResolver>(),
             sp.GetRequiredService<RoutingConfig>(),
-            sp.GetRequiredService<ILogger<ModelRoutingHints>>()));
+            sp.GetRequiredService<ILogger<ModelRoutingHints>>(),
+            routingHintsTtl));
 
         // QualitySampler — idle-capacity LLM output quality scoring via Claude Sonnet
         services.AddSingleton<QualitySampler>(sp => new QualitySampler(

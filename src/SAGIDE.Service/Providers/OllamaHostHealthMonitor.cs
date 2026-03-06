@@ -21,7 +21,7 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
     private readonly List<string> _allUrls; // all known Ollama base URLs
     private readonly ILogger<OllamaHostHealthMonitor> _logger;
     private readonly ConcurrentDictionary<string, HostState> _state = new();
-    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(30);
+    private readonly TimeSpan _pollInterval;
     private readonly EndpointAliasResolver? _aliasResolver;
 
     private sealed record HostState(
@@ -33,10 +33,12 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
     public OllamaHostHealthMonitor(
         IEnumerable<string> knownUrls,
         ILogger<OllamaHostHealthMonitor> logger,
-        EndpointAliasResolver? aliasResolver = null)
+        EndpointAliasResolver? aliasResolver = null,
+        int pollIntervalSeconds = 30)
     {
         _logger        = logger;
         _aliasResolver = aliasResolver;
+        _pollInterval  = TimeSpan.FromSeconds(pollIntervalSeconds > 0 ? pollIntervalSeconds : 30);
         _allUrls       = knownUrls.Select(u => u.TrimEnd('/')).Distinct().ToList();
 
         // Initialize all hosts as unknown until the first poll
@@ -60,7 +62,7 @@ public sealed class OllamaHostHealthMonitor : BackgroundService
         // Poll immediately so routing is available before the first workflow step
         await PollAllAsync(ct);
 
-        using var timer = new PeriodicTimer(PollInterval);
+        using var timer = new PeriodicTimer(_pollInterval);
         while (await timer.WaitForNextTickAsync(ct))
             await PollAllAsync(ct);
     }

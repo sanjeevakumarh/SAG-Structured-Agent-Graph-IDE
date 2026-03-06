@@ -32,18 +32,20 @@ public sealed class ModelRoutingHints
     private readonly object _cacheRefreshLock = new();
 
     private const int CacheWindowMinutes = 60;
-    private const int CacheTtlSeconds   = 60;
+    private readonly int _cacheTtlSeconds;
 
     public ModelRoutingHints(
         IModelPerfRepository? perfRepo,
         EndpointAliasResolver aliasResolver,
         RoutingConfig config,
-        ILogger<ModelRoutingHints> logger)
+        ILogger<ModelRoutingHints> logger,
+        int cacheTtlSeconds = 60)
     {
-        _perfRepo      = perfRepo;
-        _aliasResolver = aliasResolver;
-        _config        = config;
-        _logger        = logger;
+        _perfRepo         = perfRepo;
+        _aliasResolver    = aliasResolver;
+        _config           = config;
+        _logger           = logger;
+        _cacheTtlSeconds  = cacheTtlSeconds > 0 ? cacheTtlSeconds : 60;
 
         var sum = config.Weights.UserChoice + config.Weights.Performance + config.Weights.Quality;
         if (Math.Abs(sum - 1.0) > 0.05)
@@ -116,7 +118,7 @@ public sealed class ModelRoutingHints
             shouldRefresh = DateTime.UtcNow >= _cacheExpiry;
             if (shouldRefresh)
                 // Extend expiry optimistically to prevent concurrent refresh stampede.
-                _cacheExpiry = DateTime.UtcNow.AddSeconds(CacheTtlSeconds);
+                _cacheExpiry = DateTime.UtcNow.AddSeconds(_cacheTtlSeconds);
         }
 
         if (shouldRefresh)

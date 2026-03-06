@@ -9,6 +9,7 @@ using SAGIDE.Service.Infrastructure;
 using SAGIDE.Service.Orchestrator;
 using SAGIDE.Service.Providers;
 using SAGIDE.Service.Resilience;
+using SAGIDE.Core.Models;
 using SAGIDE.Service.Routing;
 
 Log.Logger = new LoggerConfiguration()
@@ -58,6 +59,7 @@ try
     builder.Services.AddConfiguredSingleton<LoggingConfig>(builder.Configuration, "SAGIDE:Logging");
     builder.Services.AddConfiguredSingleton<AgentLimitsConfig>(builder.Configuration, "SAGIDE:AgentLimits");
     builder.Services.AddConfiguredSingleton<WorkflowPolicyConfig>(builder.Configuration, "SAGIDE:WorkflowPolicy");
+    builder.Services.AddConfiguredSingleton<CachingConfig>(builder.Configuration, "SAGIDE:Caching");
     builder.Services.AddSingleton<WorkflowPolicyEngine>();
     builder.Services.AddSingleton(new TaskAffinitiesConfig());
 

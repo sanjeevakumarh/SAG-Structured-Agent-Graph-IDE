@@ -41,6 +41,7 @@ public class AgentOrchestrator : ITaskSubmissionService
     private readonly IModelPerfRepository? _perfRepo;
     private readonly EndpointAliasResolver? _aliasResolver;
     private readonly Routing.QualitySampler? _qualitySampler;
+    private readonly CachingConfig _cachingConfig;
     private CancellationTokenSource? _processingCts;
 
     // ── Ollama failover constants ──────────────────────────────────────────────
@@ -90,7 +91,8 @@ public class AgentOrchestrator : ITaskSubmissionService
         Providers.OllamaHostHealthMonitor? ollamaMonitor = null,
         IModelPerfRepository? perfRepo = null,
         EndpointAliasResolver? aliasResolver = null,
-        Routing.QualitySampler? qualitySampler = null)
+        Routing.QualitySampler? qualitySampler = null,
+        CachingConfig? cachingConfig = null)
     {
         _taskQueue = taskQueue;
         _serviceProvider = serviceProvider;
@@ -116,6 +118,7 @@ public class AgentOrchestrator : ITaskSubmissionService
         _perfRepo            = perfRepo;
         _aliasResolver       = aliasResolver;
         _qualitySampler      = qualitySampler;
+        _cachingConfig           = cachingConfig ?? new CachingConfig();
         _loggingConfig           = loggingConfig ?? new Infrastructure.LoggingConfig();
         _metrics                 = metrics;
         _circuitBreakerRegistry  = circuitBreakerRegistry;
@@ -292,7 +295,7 @@ public class AgentOrchestrator : ITaskSubmissionService
             // Determinism — check output cache before calling the model.
             // Cache key: SHA-256 of (prompt + modelId + provider) — sufficient for replay uniqueness.
             var cacheKey = ComputeCacheKey(basePrompt, task.ModelId, task.ModelProvider.ToString());
-            if (!task.ForceRerun && _repository is not null)
+            if (_cachingConfig.OutputCacheEnabled && !task.ForceRerun && _repository is not null)
             {
                 var cached = await _repository.GetCachedOutputAsync(cacheKey);
                 if (cached is not null)
@@ -425,7 +428,7 @@ public class AgentOrchestrator : ITaskSubmissionService
             _qualitySampler?.Trigger(task, prompt, lastResponse ?? "");
 
             // Determinism — store final output in cache (fire-and-forget, non-fatal)
-            if (_repository is not null && !string.IsNullOrEmpty(lastResponse))
+            if (_cachingConfig.OutputCacheEnabled && _repository is not null && !string.IsNullOrEmpty(lastResponse))
                 _ = _repository.StoreCachedOutputAsync(cacheKey, lastResponse, task.ModelId)
                     .ContinueWith(t => _logger.LogWarning(t.Exception, "Cache store failed for task {TaskId}", task.Id),
                         System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
