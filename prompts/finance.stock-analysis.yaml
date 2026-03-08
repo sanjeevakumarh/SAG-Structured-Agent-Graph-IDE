@@ -16,7 +16,7 @@ model_preference:
   orchestrator: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
   subtasks:
     # Fast structured-output model for query planning
-    planner:   ollama/qwen2.5:14b-instruct-q5_K_M@workstation
+    planner:   ollama/llama3.1:8b-instruct-q6_K@mini
     # Strong local model for the four parallel analysis sections
     analyst:   ollama/qwen2.5:14b-instruct-q5_K_M@workstation
     # Frontier model for final assembly — coherence + writing quality matter here
@@ -42,9 +42,6 @@ variables:
     General investor. Interested in medium-term (3-12 month) opportunities.
     Moderate risk tolerance. Dividend-paying equities and sector rotation plays.
 
-  # Optional: personal investment notes file (silent no-op if missing)
-  context_file: "~/projects/context/INVESTMENT_CONTEXT.md"
-
   max_results: "8"
   output_subdir: "finance"
   analyst_model_override: ""
@@ -69,13 +66,16 @@ workflow:
 # ── Data collection ────────────────────────────────────────────────────────────
 data_collection:
   steps:
-    # Step 1 — Load personal investment notes (silent no-op if file missing)
+    # Step 1 — Search Logseq notes for personal investment context
     - name: load_personal_context
-      type: read_file
-      source: "{{context_file}}"
+      type: vector_search
+      source: logseq_notes
+      prompt_template: "{{ticker}} investment portfolio position strategy"
+      parameters:
+        top_k: 5
       output_var: personal_context
 
-    # Step 3 — Run all four analysis sections in parallel via llm_per_section.
+    # Step 2 — Run all four analysis sections in parallel via llm_per_section.
     # The planning prompt returns exactly the 4 section titles; each section then
     # receives a tailored analysis prompt routed by {{section_name}}.
     - name: run_analyses
@@ -96,7 +96,7 @@ data_collection:
         Ticker: {{ticker_upper}} ({{asset_type}})
         Analyst context: {{context}}
         Date: {{date}}
-        Personal notes: {{personal_context}}
+        Personal notes (brief reference only): {{personal_context | string.truncate 500}}
 
         ## DATA RULES (apply to EVERY section)
         1. Copy numbers VERBATIM from the source material below. Search snippets are
@@ -505,16 +505,23 @@ subtasks:
       and what the combined picture means for the analyst's stated context.
 
       ## Technical Analysis
-      Copy the Technical Analysis section from above with all its sub-headings.
+      Paste the FULL Technical Analysis content from the analyst sections above — include every
+      sub-heading (### Trend & Price Structure, ### Momentum Indicators, etc.) and all data
+      points exactly as written. Do NOT summarize, shorten, or replace with a placeholder.
 
       ## Fundamental Analysis
-      Copy the Fundamental Analysis section from above with all its sub-headings.
+      Paste the FULL Fundamental Analysis content from the analyst sections above — include every
+      sub-heading (### Revenue & Earnings, ### Margins, ### Valuation, etc.) and all data
+      points exactly as written. Do NOT summarize, shorten, or replace with a placeholder.
 
       ## Competitive Landscape
-      Copy the Competitive Landscape section from above with all its sub-headings.
+      Paste the FULL Competitive Landscape content from the analyst sections above — include every
+      sub-heading (### Market Position, ### Key Competitors, etc.) and all data
+      points exactly as written. Do NOT summarize, shorten, or replace with a placeholder.
 
       ## Investment Thesis
-      Copy the Investment Thesis section from above with all its sub-headings.
+      Paste the FULL Investment Thesis content from the analyst sections above — include every
+      sub-heading (### Summary, ### Base / Bull / Bear Cases, etc.) and all data exactly as written.
       If the rating conflicts with the gate rule, adjust per the rule and note the adjustment inline.
 
       ## Action Items
@@ -525,7 +532,11 @@ subtasks:
       ---
       *Report generated {{date}} by SAGIDE Research · Ticker: {{ticker_upper}} · Do your own due diligence.*
 
-      End of output format. Personal notes: {{personal_context}}
+      End of output format.
+
+      PERSONAL NOTES (for reference only — do NOT summarize these notes; only use them
+      to add a personal context sentence in Action Items if they mention {{ticker_upper}}):
+      {{personal_context | string.truncate 2000}}
 
 # ── Synthesis ─────────────────────────────────────────────────────────────────
 synthesis:

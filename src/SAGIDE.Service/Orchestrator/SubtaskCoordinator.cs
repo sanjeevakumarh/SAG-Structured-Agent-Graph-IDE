@@ -57,6 +57,8 @@ public sealed class SubtaskCoordinator
         "this", "that", "be", "was", "were", "about", "into", "over",
     };
 
+    private readonly RagPipeline? _ragPipeline;
+
     public SubtaskCoordinator(
         ITaskSubmissionService taskSubmission,
         WebFetcher fetcher,
@@ -64,7 +66,8 @@ public sealed class SubtaskCoordinator
         IConfiguration config,
         ILogger<SubtaskCoordinator> logger,
         OllamaHostHealthMonitor? healthMonitor = null,
-        SkillRegistry? skillRegistry = null)
+        SkillRegistry? skillRegistry = null,
+        RagPipeline? ragPipeline = null)
     {
         _taskSubmission = taskSubmission;
         _fetcher        = fetcher;
@@ -73,6 +76,7 @@ public sealed class SubtaskCoordinator
         _logger        = logger;
         _healthMonitor = healthMonitor;
         _skillRegistry = skillRegistry;
+        _ragPipeline   = ragPipeline;
         _allOllamaUrls = config.GetSection("SAGIDE:Ollama:Servers")
             .GetChildren()
             .Select(s => s["BaseUrl"]?.TrimEnd('/') ?? string.Empty)
@@ -275,6 +279,10 @@ public sealed class SubtaskCoordinator
         if (prompt.ModelPreference is not null)
         {
             var mp = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            if (prompt.ModelPreference.Primary is not null)
+                mp["primary"] = prompt.ModelPreference.Primary;
+            if (prompt.ModelPreference.Fallback is not null)
+                mp["fallback"] = prompt.ModelPreference.Fallback;
             if (prompt.ModelPreference.Orchestrator is not null)
                 mp["orchestrator"] = prompt.ModelPreference.Orchestrator;
             if (prompt.ModelPreference.Subtasks.Count > 0)
@@ -475,8 +483,8 @@ public sealed class SubtaskCoordinator
             // {{ for …}) are intentional pass-through templates used for later rendering (e.g.
             // section_analysis_prompt overrides) and must be kept verbatim.
             var mergedParams = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
-            foreach (var kv in skill.Parameters) mergedParams[kv.Key] = PreRenderParam(kv.Value, vars);
-            foreach (var kv in step.Parameters)  mergedParams[kv.Key] = PreRenderParam(kv.Value, vars);
+            foreach (var kv in skill.Parameters) mergedParams[kv.Key] = PreRenderParam(kv.Value, vars, kv.Key);
+            foreach (var kv in step.Parameters)  mergedParams[kv.Key] = PreRenderParam(kv.Value, vars, kv.Key);
 
             // Honour the calling step's output_var if set (overrides skill default)
             if (!string.IsNullOrWhiteSpace(step.OutputVar))
@@ -506,12 +514,19 @@ public sealed class SubtaskCoordinator
                 // does one pass — embedded {{ if }} tags in the parameter value are emitted as literal
                 // text, not re-evaluated.  Setting the field directly lets execution-time rendering
                 // process the conditionals with section_name and other vars in scope.
-                if (mergedParams.TryGetValue("section_analysis_prompt", out var sapVal)
-                    && sapVal is string sapStr && !string.IsNullOrWhiteSpace(sapStr))
-                    clone.SectionAnalysisPrompt = sapStr;
-                if (mergedParams.TryGetValue("planning_prompt", out var ppVal)
-                    && ppVal is string ppStr && !string.IsNullOrWhiteSpace(ppStr))
-                    clone.PlanningPrompt = ppStr;
+                // Note: values may arrive as JsonElement (from REST API deserialization) — use ToString().
+                if (mergedParams.TryGetValue("section_analysis_prompt", out var sapVal))
+                {
+                    var sapStr = sapVal?.ToString();
+                    if (!string.IsNullOrWhiteSpace(sapStr))
+                        clone.SectionAnalysisPrompt = sapStr;
+                }
+                if (mergedParams.TryGetValue("planning_prompt", out var ppVal))
+                {
+                    var ppStr = ppVal?.ToString();
+                    if (!string.IsNullOrWhiteSpace(ppStr))
+                        clone.PlanningPrompt = ppStr;
+                }
 
                 expanded.Add(clone);
 
@@ -546,9 +561,13 @@ public sealed class SubtaskCoordinator
         var map = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
         foreach (var (slot, req) in skill.CapabilityRequirements)
         {
-            // Try capability key built from needs joined with "+"
-            var capKey = string.Join("+", req.Needs);
-            var resolved = _config[$"SAGIDE:Routing:Capabilities:{capKey}"];
+            // Try slot name first (e.g. "deep_analyst"), then needs joined with "+"
+            var resolved = _config[$"SAGIDE:Routing:Capabilities:{slot}"];
+            if (string.IsNullOrWhiteSpace(resolved))
+            {
+                var capKey = string.Join("+", req.Needs);
+                resolved = _config[$"SAGIDE:Routing:Capabilities:{capKey}"];
+            }
 
             // Fall back to model_preference.orchestrator if no capability mapping found
             if (string.IsNullOrWhiteSpace(resolved))
@@ -562,7 +581,7 @@ public sealed class SubtaskCoordinator
             if (string.IsNullOrWhiteSpace(resolved))
                 _logger.LogWarning(
                     "No capability mapping found for slot '{Slot}' (needs: [{Needs}]) in skill '{Skill}'",
-                    slot, capKey, skill.Name);
+                    slot, string.Join("+", req.Needs), skill.Name);
 
             map[slot] = resolved ?? string.Empty;
         }
@@ -609,10 +628,16 @@ public sealed class SubtaskCoordinator
     /// Values containing Scriban control-flow tags are intentional pass-through
     /// templates (e.g. section_analysis_prompt overrides) and are kept verbatim.
     /// </summary>
-    private static object PreRenderParam(object value, Dictionary<string, object> vars)
+    private static object PreRenderParam(object value, Dictionary<string, object> vars,
+        string? paramName = null)
     {
         if (value is not string s) return value;
         if (!s.Contains("{{")) return value;  // no template syntax — nothing to render
+
+        // Prompt override params are always pass-through — they contain {{section_name}}
+        // and other vars only available at execution time, not at expansion time.
+        if (paramName is "section_analysis_prompt" or "planning_prompt" or "prompt_template")
+            return value;
 
         // Detect Scriban control flow: these are pass-through templates for later rendering
         if (s.Contains("{{ if ")   || s.Contains("{{- if ")   ||
@@ -779,7 +804,7 @@ public sealed class SubtaskCoordinator
                         .Replace("{item}",     item);
 
                     _logger.LogDebug("web_search_batch '{Name}': querying '{Query}'", step.Name, query);
-                    var result = await _search.SearchAsync(query, maxResults, ct);
+                    var result = await _search.SearchAsync(query, maxResults, prompt.Domain, ct);
                     if (!string.IsNullOrWhiteSpace(result))
                         sections.Add($"## Search: {query}\n{result}");
                 }
@@ -888,7 +913,7 @@ public sealed class SubtaskCoordinator
                 {
                     qi++;
                     _logger.LogDebug("llm_queries '{Name}': searching '{Query}'", step.Name, query);
-                    var searchResult = await _search.SearchAsync(query, maxResults, ct);
+                    var searchResult = await _search.SearchAsync(query, maxResults, prompt.Domain, ct);
                     tracer.Write($"step-{step.Name}-search-q{qi:D2}", new
                     {
                         query,
@@ -1118,6 +1143,31 @@ public sealed class SubtaskCoordinator
                 var llmResult = await WaitForTaskAsync(llmTaskId, ct);
                 tracer.WriteText($"step-{step.Name}-result", llmResult);
                 return llmResult;
+            }
+
+            case "vector_search":
+            {
+                if (_ragPipeline is null)
+                {
+                    _logger.LogWarning("vector_search step '{Name}' skipped — RagPipeline not available", step.Name);
+                    tracer.Write($"step-{step.Name}-skipped", new { reason = "rag_pipeline_not_available" });
+                    return string.Empty;
+                }
+
+                var queryTemplate = step.PromptTemplate ?? step.Query ?? string.Empty;
+                var query = PromptTemplate.RenderRaw(queryTemplate, vars);
+                var sourceTag = step.Source ?? string.Empty;
+                var topK = 20;
+                if (step.Parameters.TryGetValue("top_k", out var topKObj)
+                    && int.TryParse(topKObj?.ToString(), out var parsed))
+                    topK = parsed;
+
+                _logger.LogInformation("vector_search step '{Name}': query={Query}, tag={Tag}, topK={K}",
+                    step.Name, query[..Math.Min(query.Length, 80)], sourceTag, topK);
+
+                var context = await _ragPipeline.GetRelevantContextAsync(query, topK, sourceTag, ct);
+                tracer.WriteText($"step-{step.Name}-result", context);
+                return context;
             }
 
             default:

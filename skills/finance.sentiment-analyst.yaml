@@ -79,7 +79,7 @@ implementation:
       Short interest as % of float. Days to cover. Any short squeeze conditions?
 
       Cite specific analyst names, dates, and numbers from source material.
-      If data is absent from sources, write "Data unavailable" — do NOT estimate.
+      If data is absent from sources, write "[DATA UNAVAILABLE]" (this exact marker) — do NOT estimate or use prose like "not available".
 
       **Signal: POSITIVE / NEUTRAL / NEGATIVE** — one sentence rationale.
 

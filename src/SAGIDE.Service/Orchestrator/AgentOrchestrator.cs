@@ -511,7 +511,7 @@ public class AgentOrchestrator : ITaskSubmissionService
 
                 // Host unreachable (DNS failure, connection refused) or busy-wait exhausted:
                 // route to a different healthy server.
-                if (!requeued && (IsOllamaConnectivityError(ex) || IsOllamaBusyError(ex)))
+                if (!requeued && (IsOllamaConnectivityError(ex) || IsOllamaBusyError(ex) || IsOllamaServerError(ex)))
                     requeued = await TryRequeueWithFailoverAsync(task);
 
                 if (requeued) return; // don't penalise circuit breaker for retriable errors
@@ -632,6 +632,14 @@ public class AgentOrchestrator : ITaskSubmissionService
     private static bool IsOllamaBusyError(Exception ex)
         => ex is HttpRequestException { StatusCode: System.Net.HttpStatusCode.TooManyRequests
                                                  or System.Net.HttpStatusCode.ServiceUnavailable };
+
+    /// <summary>
+    /// Returns true when the Ollama server returned HTTP 500 (Internal Server Error).
+    /// Common cause: CUDA OOM when the model doesn't fit in VRAM. Retriable on a
+    /// different host that may have more memory available.
+    /// </summary>
+    private static bool IsOllamaServerError(Exception ex)
+        => ex is HttpRequestException { StatusCode: System.Net.HttpStatusCode.InternalServerError };
 
     /// <summary>
     /// Returns a set of Ollama base URLs that are currently targeted by running or

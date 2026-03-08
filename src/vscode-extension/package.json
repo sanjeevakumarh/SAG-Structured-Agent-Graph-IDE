@@ -176,6 +176,11 @@
         "command": "sagIDE.refreshSkillLibrary",
         "title": "SAG: Refresh Skill Library",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "sagIDE.searchNotes",
+        "title": "SAG: Search Knowledge Base",
+        "icon": "$(search)"
       }
     ],
     "viewsContainers": {

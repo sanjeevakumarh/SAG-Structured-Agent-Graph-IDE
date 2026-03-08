@@ -88,6 +88,12 @@ public static class ServiceCollectionExtensions
         // Model quality tracking — pruning runs in DatabaseInitializer hosted service
         services.AddSingleton<IModelQualityRepository>(_ => new SqliteModelQualityRepository(dbPath));
 
+        // Notes file index — tracks which Logseq files have been indexed
+        services.AddSingleton(_ => new NotesFileIndexRepository(dbPath));
+
+        // Persistent search cache — survives restarts, quality-gated
+        services.AddSingleton(_ => new SearchCacheRepository(dbPath));
+
         // Async DB initialization — registered here so it starts before all other hosted services.
         services.AddHostedService<DatabaseInitializer>();
 
@@ -281,6 +287,7 @@ public static class ServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddSagideRagPipeline(
         this IServiceCollection services,
+        IConfiguration cfg,
         string dbPath)
     {
         services.AddHttpClient<WebFetcher>(client =>
@@ -298,6 +305,16 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(sp =>
             new VectorStore(dbPath, sp.GetRequiredService<ILogger<VectorStore>>()));
         services.AddSingleton<RagPipeline>();
+
+        // Notes indexer — background service for Logseq graph embedding
+        var notesConfig = new NotesConfig();
+        cfg.GetSection("SAGIDE:Notes").Bind(notesConfig);
+        services.AddSingleton(notesConfig);
+        if (notesConfig.Enabled)
+        {
+            services.AddSingleton<NotesIndexerService>();
+            services.AddHostedService(sp => sp.GetRequiredService<NotesIndexerService>());
+        }
 
         return services;
     }

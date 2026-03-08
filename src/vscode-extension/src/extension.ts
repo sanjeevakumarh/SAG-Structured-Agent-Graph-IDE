@@ -17,6 +17,7 @@ import { WorkflowGraphPanel } from './views/WorkflowGraphPanel';
 import { PromptLibraryProvider } from './views/PromptLibraryProvider';
 import { SkillLibraryProvider } from './views/SkillLibraryProvider';
 import { SkillComposerPanel } from './views/SkillComposerPanel';
+import { NotesSearchPanel } from './views/NotesSearchPanel';
 
 let connection: ServiceConnection;
 
@@ -55,6 +56,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         ),
         vscode.commands.registerCommand('sagIDE.refreshSkillLibrary', () => {
             skillLibrary.refresh();
+        }),
+        vscode.commands.registerCommand('sagIDE.searchNotes', () => {
+            NotesSearchPanel.show(context, restBaseUrl);
         })
     );
 

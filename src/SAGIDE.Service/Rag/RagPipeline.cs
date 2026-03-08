@@ -29,6 +29,9 @@ public sealed class RagPipeline
         _logger   = logger;
     }
 
+    public EmbeddingService Embedder => _embedder;
+    public VectorStore Store => _store;
+
     // ── Public API ────────────────────────────────────────────────────────────
 
     /// <summary>

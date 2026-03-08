@@ -37,11 +37,11 @@ public class SkillRenderingTests
     // requires the SectionAnalysisPrompt pass-through fix in CloneStepRendered.
 
     [SkippableTheory]
-    [InlineData("Orientation (101)",     "### 101 Orientation")]
-    [InlineData("Core Concepts (201)",   "### Core Concepts (201)")]
-    [InlineData("Advanced Topics (301)", "### Advanced Topics (301)")]
-    [InlineData("Practice & Projects",  "### Practice & Projects")]
-    [InlineData("Assessment & Timeline","### Assessment & Timeline")]
+    [InlineData("Orientation (101)",     "Produce: key learning goals")]
+    [InlineData("Core Concepts (201)",   "Produce: the spine of the subject")]
+    [InlineData("Advanced Topics (301)", "Produce: frontier topics")]
+    [InlineData("Practice & Projects",  "Produce: a ladder of practice")]
+    [InlineData("Assessment & Timeline","Produce: a week-by-week schedule")]
     public void StudyGuideGenerator_KnownSection_RendersCorrectHeading(
         string sectionName, string expectedHeading)
     {
@@ -49,6 +49,7 @@ public class SkillRenderingTests
         var rendered = RenderStudyGuideSection(template, sectionName);
 
         Assert.Contains(expectedHeading, rendered);
+        Assert.Contains("FORMAT RULES", rendered);
     }
 
     [SkippableTheory]

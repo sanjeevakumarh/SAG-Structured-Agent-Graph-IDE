@@ -80,7 +80,7 @@ try
     builder.Services.AddSagideProviders(builder.Configuration, timeoutConfig);
     builder.Services.AddSagideOrchestration(builder.Configuration);
     builder.Services.AddSagideCommunication(builder.Configuration, pipeName);
-    builder.Services.AddSagideRagPipeline(dbPath);
+    builder.Services.AddSagideRagPipeline(builder.Configuration, dbPath);
 
     // OpenAPI — JSON schema at /openapi/v1.json; endpoint is gated on development below.
     builder.Services.AddOpenApi();
@@ -139,6 +139,7 @@ try
     app.MapMetricsEndpoints();
     app.MapModelMetricsEndpoints();
     app.MapSkillsEndpoints();
+    app.MapNotesEndpoints();
 
     // Redirect /dashboard → / for discoverability
     app.MapGet("/dashboard", () => Results.Redirect("/"));

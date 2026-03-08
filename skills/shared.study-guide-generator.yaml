@@ -96,27 +96,30 @@ implementation:
         * Hardware path: Arduino-class to STM32 or SBC; include wiring/safety checklists and bill of materials that are open-source friendly.
         * Field constraints: power budget, weather sealing, and latency considerations for small/medium-scale farm use.
 
-      {{ if section_name == "Orientation (101)" }}
-      ⚠ OUTPUT RULE: Your FIRST line MUST be "### 101 Orientation" — no preamble, no
-      meta-commentary, no acknowledgement. Begin immediately with that heading.
+      FORMAT RULES (apply to ALL sections):
+      - Do NOT output a section heading — it is added automatically. Start directly with structured content (e.g., bold sub-headers, bullet lists). No introductory paragraph or meta-summary.
+      - The GATE_SIGNAL block MUST be the LAST thing in your output, after ALL other content. Never place it at the top or middle.
+      - CITATION INTEGRITY: Only cite resources you are CERTAIN exist. Prefer: official documentation, top-selling textbooks, and major MOOCs (Coursera, edX, MIT OCW). For books, only cite if you are confident of BOTH the exact title AND the correct author(s). If unsure about the author, cite the title only and add "[verify availability]". For papers, only cite seminal works you are confident are real (e.g., Dijkstra 1968, Lamport 1978, etc.). For courses, only cite specific ones you know exist on the named platform. It is ALWAYS better to cite fewer high-confidence sources than many dubious ones.
+      - Every vocabulary term must be unique — no duplicates.
+      - Use the exact GATE_SIGNAL format shown (with ### heading, SIGNAL on its own line, RATIONALE on its own line). Do not use brackets around the signal value.
 
+      {{ if section_name == "Orientation (101)" }}
       Produce: key learning goals, prerequisite checklist, and a short bridge plan to close gaps.
       - Prerequisites to fill: list 5-8 items with one recommended primer each (chapter or video).
       - Canonical intros: 2-3 textbooks or courses with exact chapters or lectures to cover first; bias to open-source or freely accessible.
-      - Vocabulary: 10-15 essential terms with one-line definitions.
+      - Vocabulary: 10-15 essential terms with one-line definitions. Each term must appear exactly once.
       - Quickstart: 3 starter exercises (timeboxed ≤ 60 minutes each) with expected artifacts.
       - If robotics: include initial ROS 2 + sim install steps and a single safety checklist before hardware work.
 
       Cite resources with title, author, and year. Prefer authoritative sources
       (textbooks, standards docs, official documentation) over blog posts.
 
+      End with exactly:
       ### GATE_SIGNAL
-      SIGNAL: [READY | NEEDS_BACKGROUND | MISSING_PREREQS]
-      RATIONALE: [one sentence — can the learner start now, or must gaps be filled first?]
+      SIGNAL: READY or NEEDS_BACKGROUND or MISSING_PREREQS
+      RATIONALE: one sentence — can the learner start now, or must gaps be filled first?
 
       {{ else if section_name == "Core Concepts (201)" }}
-      ⚠ OUTPUT RULE: Your FIRST line MUST be "### Core Concepts (201)" — no preamble.
-
       Produce: the spine of the subject with readings and practice.
       - Core modules: 5-8 themes. For each, list learning objectives and 2-3 targeted readings
         (textbook chapters, high-quality lectures, or standards docs). Prefer open-source or freely available resources when possible.
@@ -127,13 +130,12 @@ implementation:
       Cite resources with title, author, and year. Prefer authoritative sources over blogs.
       Assume the reader completed Orientation (101); do not repeat that content.
 
+      End with exactly:
       ### GATE_SIGNAL
-      SIGNAL: [COMPREHENSIVE | PARTIALLY_COVERED | DATA_LIMITED]
-      RATIONALE: [one sentence — is core coverage complete, or are critical areas thin?]
+      SIGNAL: COMPREHENSIVE or PARTIALLY_COVERED or DATA_LIMITED
+      RATIONALE: one sentence — is core coverage complete, or are critical areas thin?
 
       {{ else if section_name == "Advanced Topics (301)" }}
-      ⚠ OUTPUT RULE: Your FIRST line MUST be "### Advanced Topics (301)" — no preamble.
-
       Produce: frontier topics and expert-level material.
       - Specializations: 4-6 sub-areas; for each, cite 1-2 seminal papers (with year) or
         authoritative chapters. Include at least one robotics-relevant seminal paper when the subject is robotics.
@@ -144,13 +146,12 @@ implementation:
       Include at least one seminal paper. Cite resources with title, author, and year.
       Assume the reader completed Core Concepts (201); do not repeat that content.
 
+      End with exactly:
       ### GATE_SIGNAL
-      SIGNAL: [REACHABLE | STRETCH_GOAL | EXPERT_LEVEL]
-      RATIONALE: [one sentence — is 301 achievable within the stated timeframe and background?]
+      SIGNAL: REACHABLE or STRETCH_GOAL or EXPERT_LEVEL
+      RATIONALE: one sentence — is 301 achievable within the stated timeframe and background?
 
       {{ else if section_name == "Practice & Projects" }}
-      ⚠ OUTPUT RULE: Your FIRST line MUST be "### Practice & Projects" — no preamble.
-
       Produce: a ladder of practice from drills to capstone.
       - Drills: 5-8 repeatable tasks with measurable completion criteria.
       - Projects: three tiers (starter, core, capstone). For each: requirements, datasets or
@@ -161,13 +162,12 @@ implementation:
       Prefer open-source tools and freely available datasets.
       Include at least one project that integrates 201-level material.
 
+      End with exactly:
       ### GATE_SIGNAL
-      SIGNAL: [EXECUTABLE | NEEDS_SETUP | RESOURCE_LIMITED]
-      RATIONALE: [one sentence — can the capstone be started with the learner's current setup?]
+      SIGNAL: EXECUTABLE or NEEDS_SETUP or RESOURCE_LIMITED
+      RATIONALE: one sentence — can the capstone be started with the learner's current setup?
 
       {{ else if section_name == "Assessment & Timeline" }}
-      ⚠ OUTPUT RULE: Your FIRST line MUST be "### Assessment & Timeline" — no preamble.
-
       Produce: a week-by-week schedule respecting the timeframe and weekly hours.
       - Timeline: break down all weeks with what to read, watch, and build; align 101→201→301 progression. Keep total time within the stated hours; flag any stretch work.
       - Checkpoints: weekly quizzes or reflections aligned to {{parameters.assessment_style ?? "weekly checkpoints + capstone project"}}.
@@ -175,8 +175,9 @@ implementation:
       - Spaced review: when to revisit concepts and how to validate retention.
       - Risk controls: what to cut or compress if behind schedule; what to deepen if ahead. If robotics, include a hardware/safety buffer week.
 
+      End with exactly:
       ### GATE_SIGNAL
-      SIGNAL: [REALISTIC | COMPRESSED | INSUFFICIENT_HOURS]
-      RATIONALE: [one sentence — is the schedule achievable at the stated hours/week, or overloaded?]
+      SIGNAL: REALISTIC or COMPRESSED or INSUFFICIENT_HOURS
+      RATIONALE: one sentence — is the schedule achievable at the stated hours/week, or overloaded?
 
       {{ end }}

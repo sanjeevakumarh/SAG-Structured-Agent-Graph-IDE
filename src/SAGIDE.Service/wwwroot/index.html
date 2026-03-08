@@ -119,6 +119,33 @@
     .report-card:hover { border-color: var(--accent); }
     .report-card .name { font-size: 13px; font-weight: 500; margin-bottom: 4px; }
     .report-card .meta { font-size: 11px; color: var(--muted); }
+
+    /* ── Notes search ─────────────────────────────── */
+    .notes-search-box { display: flex; gap: 8px; margin-bottom: 16px; }
+    .notes-search-box input { flex: 1; }
+    .notes-search-box select { width: 80px; }
+    .note-result { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+                   padding: 14px; margin-bottom: 10px; transition: border-color .2s; }
+    .note-result:hover { border-color: var(--accent); }
+    .note-result .note-header { display: flex; justify-content: space-between; align-items: center;
+                                margin-bottom: 6px; }
+    .note-result .note-file { font-weight: 500; font-size: 14px; color: var(--accent); cursor: pointer; }
+    .note-result .note-file:hover { text-decoration: underline; }
+    .note-result .note-score { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+    .note-result .note-meta { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+    .note-result .note-snippet { font-size: 13px; line-height: 1.6; white-space: pre-wrap;
+                                  word-break: break-word; color: #ccc; }
+    .note-result .note-task-badge { display: inline-block; font-size: 10px; padding: 1px 6px;
+                                    border-radius: 3px; background: #1a3a2a; color: var(--green);
+                                    margin-left: 8px; }
+    .notes-stats { display: flex; gap: 24px; margin-bottom: 16px; font-size: 13px; color: var(--muted); }
+    .notes-stats .stat-val { font-weight: 600; color: var(--text); font-family: var(--mono); }
+    .notes-summary { background: #1a2332; border: 1px solid var(--accent); border-radius: var(--radius);
+                     padding: 16px; margin-bottom: 16px; line-height: 1.7; font-size: 13px; }
+    .notes-summary-label { font-size: 11px; font-weight: 600; color: var(--accent); text-transform: uppercase;
+                           letter-spacing: 0.5px; margin-bottom: 8px; }
+    .notes-summary-text { color: #ddd; white-space: pre-wrap; }
+    .notes-summary-loading { color: var(--muted); font-style: italic; }
   </style>
 </head>
 <body>
@@ -136,6 +163,7 @@
   <button onclick="showTab('prompts')">Prompts</button>
   <button onclick="showTab('reports')">Reports</button>
   <button onclick="showTab('skills')">Skills</button>
+  <button onclick="showTab('notes')">Notes</button>
   <button onclick="showTab('workflows')">Workflows</button>
 </nav>
 
@@ -220,6 +248,30 @@
           </tr></thead>
           <tbody id="skills-body"><tr><td colspan="6" class="empty">Loading…</td></tr></tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Notes panel ─────────────────────────────── -->
+  <div id="panel-notes" class="panel">
+    <div class="card">
+      <div class="card-header"><span>Knowledge Base Search</span>
+        <button class="btn-sm" onclick="reindexNotes()">Reindex Now</button>
+      </div>
+      <div class="card-body">
+        <div id="notes-stats" class="notes-stats"></div>
+        <div class="notes-search-box">
+          <input id="notes-query" type="text" placeholder="Search your notes…"
+                 onkeydown="if(event.key==='Enter')searchNotes()"/>
+          <select id="notes-topk">
+            <option value="5">5</option>
+            <option value="10" selected>10</option>
+            <option value="20">20</option>
+          </select>
+          <button class="btn btn-primary" onclick="searchNotes()">Search</button>
+        </div>
+        <div id="notes-summary"></div>
+        <div id="notes-results"></div>
       </div>
     </div>
   </div>
@@ -316,6 +368,7 @@ function loadTab(name) {
   if (name === 'prompts')   loadPrompts();
   if (name === 'reports')   loadReports();
   if (name === 'skills')    loadSkills();
+  if (name === 'notes')     loadNotes();
   if (name === 'workflows') loadWorkflows();
 }
 
@@ -689,6 +742,78 @@ async function loadWorkflows() {
   } catch (e) {
     tbody.innerHTML = `<tr><td colspan="5" class="empty">Error: ${e.message}</td></tr>`;
   }
+}
+
+// ── Notes ─────────────────────────────────────────────
+async function loadNotes() {
+  const statsEl = document.getElementById('notes-stats');
+  try {
+    const s = await apiFetch('/api/notes/stats');
+    statsEl.innerHTML = [
+      `<span>Files: <span class="stat-val">${s.totalFiles}</span></span>`,
+      `<span>Chunks: <span class="stat-val">${s.totalChunks}</span></span>`,
+      `<span>With tasks: <span class="stat-val">${s.filesWithTasks}</span></span>`,
+      s.lastIndexTime ? `<span>Last indexed: <span class="stat-val">${fmtTime(s.lastIndexTime)}</span></span>` : '',
+    ].filter(Boolean).join('');
+  } catch { statsEl.innerHTML = '<span style="color:var(--red)">Could not load stats</span>'; }
+}
+
+async function searchNotes() {
+  const query = document.getElementById('notes-query').value.trim();
+  if (!query) return;
+  const topK = parseInt(document.getElementById('notes-topk').value) || 10;
+  const el = document.getElementById('notes-results');
+  const sumEl = document.getElementById('notes-summary');
+  el.innerHTML = '<div class="empty">Searching…</div>';
+  sumEl.innerHTML = '';
+  try {
+    const data = await fetch(`${API}/api/notes/search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, topK }),
+    }).then(r => r.json());
+
+    if (data.message) { el.innerHTML = `<div class="empty">${data.message}</div>`; return; }
+    if (!data.results?.length) { el.innerHTML = '<div class="empty">No results found</div>'; return; }
+
+    // Show summary if present
+    if (data.summary) {
+      sumEl.innerHTML = `<div class="notes-summary">
+        <div class="notes-summary-label">AI Summary</div>
+        <div class="notes-summary-text">${escHtml(data.summary)}</div>
+      </div>`;
+    }
+
+    el.innerHTML = data.results.map(r => {
+      const modified = r.lastModified ? fmtTime(r.lastModified) : '—';
+      const taskBadge = r.hasTasks ? '<span class="note-task-badge">HAS TASKS</span>' : '';
+      const scoreColor = r.score >= 0.7 ? 'var(--green)' : r.score >= 0.5 ? 'var(--yellow)' : 'var(--muted)';
+      const fileName = r.file || r.path.split(/[\\/]/).pop();
+      return `<div class="note-result">
+        <div class="note-header">
+          <span>
+            <span class="note-file" onclick="openModal('${fileName}', this.closest('.note-result').querySelector('.note-snippet').textContent)">${fileName}</span>
+            ${taskBadge}
+          </span>
+          <span class="note-score" style="color:${scoreColor}">${(r.score * 100).toFixed(1)}% match</span>
+        </div>
+        <div class="note-meta">Modified: ${modified} · ${r.path}</div>
+        <div class="note-snippet">${escHtml(r.snippet)}</div>
+      </div>`;
+    }).join('');
+  } catch (e) { el.innerHTML = `<div class="empty" style="color:var(--red)">Error: ${e.message}</div>`; }
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function reindexNotes() {
+  try {
+    await fetch(`${API}/api/notes/reindex`, { method: 'POST' });
+    showToast('Reindex triggered — check stats in a moment');
+    setTimeout(loadNotes, 5000);
+  } catch (e) { showToast(e.message, true); }
 }
 
 // ── Init ──────────────────────────────────────────────

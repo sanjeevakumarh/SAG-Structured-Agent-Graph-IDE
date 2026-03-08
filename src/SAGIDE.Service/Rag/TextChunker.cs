@@ -31,6 +31,7 @@ public sealed class TextChunker
             ChunkMode.Fixed    => ChunkFixed(doc.Body, doc.Url, doc.SourceType),
             ChunkMode.Sentence => ChunkBySentence(doc.Body, doc.Url, doc.SourceType),
             ChunkMode.Code     => ChunkByCodeBoundary(doc.Body, doc.Url, doc.SourceType),
+            ChunkMode.Markdown => ChunkByMarkdown(doc.Body, doc.Url, doc.SourceType),
             _ => ChunkBySentence(doc.Body, doc.Url, doc.SourceType),
         };
     }
@@ -41,7 +42,9 @@ public sealed class TextChunker
         var all = new List<TextChunk>();
         foreach (var doc in docs)
         {
-            var mode = IsSourceCode(doc.Url) ? ChunkMode.Code : ChunkMode.Sentence;
+            var mode = IsSourceCode(doc.Url) ? ChunkMode.Code
+                     : IsMarkdown(doc.Url)   ? ChunkMode.Markdown
+                     : ChunkMode.Sentence;
             all.AddRange(Chunk(doc, mode));
         }
         return all;
@@ -141,6 +144,123 @@ public sealed class TextChunker
         return chunks;
     }
 
+    /// <summary>
+    /// Markdown-aware chunking: splits on headers (## / ### / etc.), keeps each header
+    /// attached to its body content, strips Logseq properties blocks, and respects
+    /// chunk size limits by falling back to sentence splitting for large sections.
+    /// </summary>
+    private IReadOnlyList<TextChunk> ChunkByMarkdown(string text, string url, string? sourceType)
+    {
+        var chunks = new List<TextChunk>();
+        var index = 0;
+
+        // Split into sections by markdown headers
+        var sections = SplitMarkdownSections(text);
+
+        var buffer = new System.Text.StringBuilder();
+
+        foreach (var (header, body) in sections)
+        {
+            // Strip Logseq :PROPERTIES: blocks
+            var cleaned = StripPropertiesBlocks(body).Trim();
+            if (string.IsNullOrWhiteSpace(cleaned))
+                continue;
+
+            var sectionText = header is not null ? $"{header}\n{cleaned}" : cleaned;
+
+            // If adding this section would exceed chunk size, flush the buffer
+            if (buffer.Length + sectionText.Length > _chunkSize && buffer.Length > 0)
+            {
+                var chunk = buffer.ToString().Trim();
+                if (!string.IsNullOrWhiteSpace(chunk))
+                    chunks.Add(new TextChunk(chunk, url, index++, sourceType));
+                buffer.Clear();
+            }
+
+            // Section itself is too large — split it with sentence chunking
+            if (sectionText.Length > _chunkSize)
+            {
+                // Flush anything in the buffer first
+                if (buffer.Length > 0)
+                {
+                    var chunk = buffer.ToString().Trim();
+                    if (!string.IsNullOrWhiteSpace(chunk))
+                        chunks.Add(new TextChunk(chunk, url, index++, sourceType));
+                    buffer.Clear();
+                }
+
+                // Sub-chunk the large section, prepending the header to each sub-chunk
+                var subChunks = ChunkBySentence(cleaned, url, sourceType);
+                foreach (var sub in subChunks)
+                {
+                    var prefixed = header is not null ? $"{header}\n{sub.Text}" : sub.Text;
+                    chunks.Add(new TextChunk(prefixed, url, index++, sourceType));
+                }
+                continue;
+            }
+
+            buffer.Append(sectionText).Append('\n');
+        }
+
+        // Flush remaining buffer
+        if (buffer.Length > 0)
+        {
+            var chunk = buffer.ToString().Trim();
+            if (!string.IsNullOrWhiteSpace(chunk))
+                chunks.Add(new TextChunk(chunk, url, index, sourceType));
+        }
+
+        return chunks;
+    }
+
+    /// <summary>Splits markdown text into (header, body) sections on heading lines.</summary>
+    private static List<(string? Header, string Body)> SplitMarkdownSections(string text)
+    {
+        var sections = new List<(string? Header, string Body)>();
+        var lines = text.Split('\n');
+        string? currentHeader = null;
+        var body = new System.Text.StringBuilder();
+
+        foreach (var line in lines)
+        {
+            if (line.Length > 0 && line[0] == '#' && line.Contains(' '))
+            {
+                // Flush previous section
+                if (body.Length > 0 || currentHeader is not null)
+                    sections.Add((currentHeader, body.ToString()));
+                currentHeader = line.TrimEnd();
+                body.Clear();
+            }
+            else
+            {
+                body.Append(line).Append('\n');
+            }
+        }
+
+        // Flush last section
+        if (body.Length > 0 || currentHeader is not null)
+            sections.Add((currentHeader, body.ToString()));
+
+        return sections;
+    }
+
+    /// <summary>Strips Logseq :PROPERTIES: ... :END: blocks from text.</summary>
+    private static string StripPropertiesBlocks(string text)
+    {
+        const string propStart = ":PROPERTIES:";
+        const string propEnd = ":END:";
+        var result = text;
+        while (true)
+        {
+            var start = result.IndexOf(propStart, StringComparison.OrdinalIgnoreCase);
+            if (start < 0) break;
+            var end = result.IndexOf(propEnd, start + propStart.Length, StringComparison.OrdinalIgnoreCase);
+            if (end < 0) break;
+            result = result[..start] + result[(end + propEnd.Length)..];
+        }
+        return result;
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private static IEnumerable<string> SplitSentences(string text)
@@ -159,6 +279,10 @@ public sealed class TextChunker
             yield return text[start..];
     }
 
+    private static bool IsMarkdown(string url) =>
+        url.EndsWith(".md", StringComparison.OrdinalIgnoreCase) ||
+        url.EndsWith(".markdown", StringComparison.OrdinalIgnoreCase);
+
     private static bool IsSourceCode(string url) =>
         url.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)  ||
         url.EndsWith(".py", StringComparison.OrdinalIgnoreCase)  ||
@@ -173,4 +297,5 @@ public enum ChunkMode
     Fixed,
     Sentence,
     Code,
+    Markdown,
 }

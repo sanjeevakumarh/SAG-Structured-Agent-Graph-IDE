@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Configuration;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Orchestrator;
 using SAGIDE.Service.Prompts;
@@ -140,6 +141,7 @@ internal static class SkillsEndpoints
                    SkillRunRequest? request,
                    SkillRegistry skillRegistry,
                    SubtaskCoordinator coordinator,
+                   IConfiguration config,
                    CancellationToken ct) =>
             {
                 var skill = skillRegistry.GetByKey(domain, name);
@@ -147,11 +149,15 @@ internal static class SkillsEndpoints
                     return Results.NotFound(new { error = $"Skill '{domain}/{name}' not found in registry" });
 
                 // Build a minimal synthetic PromptDefinition that runs just this skill
+                var defaultModel = config[$"SAGIDE:Routing:Capabilities:deep_analyst"]
+                                ?? config[$"SAGIDE:Routing:Capabilities:fast_general"]
+                                ?? "ollama/qwen2.5:14b-instruct-q5_K_M@workstation";
                 var prompt = new PromptDefinition
                 {
                     Name       = skill.Name,
                     Domain     = skill.Domain,
                     SourceTag  = $"skill_debug_{domain}_{name}",
+                    ModelPreference = new PromptModelPreference { Orchestrator = defaultModel },
                     // Expose the request parameters as prompt variables so {{param}} templates resolve
                     Variables  = request?.Parameters
                                      ?.ToDictionary(kv => kv.Key, kv => (object)kv.Value.ToString()!)

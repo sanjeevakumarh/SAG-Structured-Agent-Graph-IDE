@@ -133,6 +133,46 @@ public sealed class VectorStore
             .ToList();
     }
 
+    // ── Delete ──────────────────────────────────────────────────────────────────
+
+    /// <summary>Delete all chunks for a specific source URL (e.g. a single file path).</summary>
+    public async Task DeleteBySourceUrlAsync(string sourceUrl, CancellationToken ct = default)
+    {
+        await InitializeAsync();
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM rag_chunks WHERE source_url = @sourceUrl";
+        cmd.Parameters.AddWithValue("@sourceUrl", sourceUrl);
+        var deleted = await cmd.ExecuteNonQueryAsync(ct);
+        _logger.LogDebug("VectorStore deleted {Count} chunks for {Url}", deleted, sourceUrl);
+    }
+
+    /// <summary>Delete all chunks whose source_url starts with the given prefix.</summary>
+    public async Task DeleteBySourceUrlPrefixAsync(string urlPrefix, CancellationToken ct = default)
+    {
+        await InitializeAsync();
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM rag_chunks WHERE source_url LIKE @prefix";
+        cmd.Parameters.AddWithValue("@prefix", urlPrefix + "%");
+        var deleted = await cmd.ExecuteNonQueryAsync(ct);
+        _logger.LogDebug("VectorStore deleted {Count} chunks with prefix {Prefix}", deleted, urlPrefix);
+    }
+
+    public async Task DeleteBySourceTagAsync(string sourceTag, CancellationToken ct = default)
+    {
+        await InitializeAsync();
+        await using var conn = new SqliteConnection(_connectionString);
+        await conn.OpenAsync(ct);
+        var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM rag_chunks WHERE source_tag = @tag";
+        cmd.Parameters.AddWithValue("@tag", sourceTag);
+        var deleted = await cmd.ExecuteNonQueryAsync(ct);
+        _logger.LogInformation("VectorStore deleted {Count} chunks with source_tag {Tag}", deleted, sourceTag);
+    }
+
     // ── SQL ───────────────────────────────────────────────────────────────────
 
     private const string CreateRagChunksTable = """

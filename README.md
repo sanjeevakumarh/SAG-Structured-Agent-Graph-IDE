@@ -47,6 +47,13 @@ sequenceDiagram
 - Works cross-platform; service can be restarted independently of VS Code. Binary framing (4-byte length prefix) ensures message boundary integrity.
 - ProviderFactory routes tasks to 4 HTTP providers (Claude, Codex, Gemini), Ollama, or TensorRT-LLM with affinity-based server selection.
 
+## Updates (2026-03-07)
+- Logseq knowledge base pipeline — new notes indexer service with file index + vector store cleanup, API endpoints for search/stats/reindex, and markdown-aware chunking with task markers and source-tagged embeddings.
+- Search quality + caching — per-domain TTLs, SQLite-backed search cache with quality scoring, and web search adapter fallbacks; RAG vector store gains delete helpers for source URLs/tags.
+- UX for notes discovery — dashboard Notes tab with search + AI summary, new VS Code command/panel (`sagIDE.searchNotes`), and appsettings Notes config defaults (summary model + schedule + exclusions).
+- Prompt + skill refresh — finance stock-analysis now uses Logseq vector search for personal context and copies full analyst sections; robotics weekly digest v11 with broader queries and structured briefing; finance skills enforce the `[DATA UNAVAILABLE]` marker and stricter RSI rules; study-guide generator format rules tightened and tests aligned.
+- Reliability/tooling — Ollama 500 failover path, capability slot-to-model mapping fixes, vector_search data_collection step, default model for skill debugging, and embedded-model fallback routing.
+
 ## Updates (2026-03-06)
 - Configurable caching — new SAGIDE:Caching section toggles output caching and sets TTLs for search results, routing hints, and Ollama health polling; AgentOrchestrator now honors the cache enable flag.
 - Startup and auth hardening — async DB bootstrap/pruning via hosted service, shared ModelIdParser reused by scheduler/endpoints with tests, and bearer-token guard now HMAC-normalized for constant-time comparison.

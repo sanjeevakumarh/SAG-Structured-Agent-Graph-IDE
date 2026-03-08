@@ -66,7 +66,11 @@ implementation:
       Current trend direction, recent swing highs/lows, distance from 52-week high/low.
 
       ### Momentum Indicators
-      RSI (14-day), MACD line vs signal line — overbought, oversold, or neutral?
+      RSI (14-day): State the exact value. Classify STRICTLY as:
+        - OVERBOUGHT only if RSI > 70
+        - OVERSOLD only if RSI < 30
+        - NEUTRAL if RSI is between 30 and 70 (e.g. RSI 62 = NEUTRAL, not overbought)
+      MACD line vs signal line — bullish crossover, bearish crossover, or flat?
 
       ### Moving Averages
       Price vs 50-day and 200-day MA. Any golden cross or death cross in effect?
@@ -81,7 +85,7 @@ implementation:
       Any active formations: flags, wedges, head-and-shoulders, cup-with-handle, base, etc.
 
       For every indicator and price level, cite the specific number from source material.
-      If an indicator is absent from sources, write "Data unavailable" — do NOT estimate.
+      If an indicator is absent from sources, write "[DATA UNAVAILABLE]" (this exact marker) — do NOT estimate or use prose like "not available".
 
       **Signal: BULLISH / NEUTRAL / BEARISH** — one sentence rationale.
 

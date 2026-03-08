@@ -64,6 +64,10 @@ public class SqliteTaskRepository : SqliteRepositoryBase, ITaskRepository
         qualityTableCmd.CommandText = SqlQueries.CreateModelQualityTable;
         await qualityTableCmd.ExecuteNonQueryAsync();
 
+        var notesTableCmd = conn.CreateCommand();
+        notesTableCmd.CommandText = SqlQueries.CreateNotesFileIndex;
+        await notesTableCmd.ExecuteNonQueryAsync();
+
         // Schema migrations — ADD COLUMN is idempotent (SQLite throws on duplicate, we catch it)
         foreach (var migrationSql in SqlQueries.Migrations)
         {

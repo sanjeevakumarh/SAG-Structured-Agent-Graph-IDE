@@ -215,6 +215,78 @@ internal static class SqlQueries
     public const string PruneOldQualitySamples =
         "DELETE FROM model_quality_samples WHERE scored_at < @cutoff";
 
+    // ── notes_file_index ────────────────────────────────────────────────────────
+
+    public const string CreateNotesFileIndex = """
+        CREATE TABLE IF NOT EXISTS notes_file_index (
+            file_path      TEXT PRIMARY KEY,
+            file_size      INTEGER NOT NULL,
+            last_modified  TEXT NOT NULL,
+            last_indexed   TEXT NOT NULL,
+            chunk_count    INTEGER NOT NULL DEFAULT 0,
+            has_tasks      INTEGER NOT NULL DEFAULT 0,
+            content_hash   TEXT NOT NULL DEFAULT ''
+        )
+        """;
+
+    public const string UpsertNotesFile = """
+        INSERT INTO notes_file_index (file_path, file_size, last_modified, last_indexed, chunk_count, has_tasks, content_hash)
+        VALUES (@filePath, @fileSize, @lastModified, @lastIndexed, @chunkCount, @hasTasks, @contentHash)
+        ON CONFLICT(file_path) DO UPDATE SET
+            file_size = @fileSize, last_modified = @lastModified, last_indexed = @lastIndexed,
+            chunk_count = @chunkCount, has_tasks = @hasTasks, content_hash = @contentHash
+        """;
+
+    public const string SelectAllNotesFiles =
+        "SELECT * FROM notes_file_index";
+
+    public const string DeleteNotesFile =
+        "DELETE FROM notes_file_index WHERE file_path = @filePath";
+
+    public const string SelectNotesStats = """
+        SELECT COUNT(*) AS total_files,
+               COALESCE(SUM(chunk_count), 0) AS total_chunks,
+               MAX(last_indexed) AS last_index_time,
+               COALESCE(SUM(CASE WHEN has_tasks = 1 THEN 1 ELSE 0 END), 0) AS files_with_tasks
+        FROM notes_file_index
+        """;
+
+    // ── search_cache ──────────────────────────────────────────────────────────
+
+    public const string CreateSearchCache = """
+        CREATE TABLE IF NOT EXISTS search_cache (
+            query_hash     TEXT PRIMARY KEY,
+            query_text     TEXT NOT NULL,
+            result_text    TEXT NOT NULL,
+            result_count   INTEGER NOT NULL DEFAULT 0,
+            quality_score  REAL NOT NULL DEFAULT 1.0,
+            domain         TEXT NOT NULL DEFAULT 'default',
+            fetched_at     TEXT NOT NULL
+        )
+        """;
+
+    public const string UpsertSearchCache = """
+        INSERT INTO search_cache (query_hash, query_text, result_text, result_count, quality_score, domain, fetched_at)
+        VALUES (@queryHash, @queryText, @resultText, @resultCount, @qualityScore, @domain, @fetchedAt)
+        ON CONFLICT(query_hash) DO UPDATE SET
+            result_text = @resultText, result_count = @resultCount,
+            quality_score = @qualityScore, fetched_at = @fetchedAt
+        """;
+
+    public const string SelectSearchCache =
+        "SELECT * FROM search_cache WHERE query_hash = @queryHash";
+
+    public const string PruneSearchCache =
+        "DELETE FROM search_cache WHERE fetched_at < @cutoff";
+
+    public const string SelectSearchCacheStats = """
+        SELECT COUNT(*) AS total_entries,
+               AVG(quality_score) AS avg_quality,
+               MIN(fetched_at) AS oldest_entry,
+               MAX(fetched_at) AS newest_entry
+        FROM search_cache
+        """;
+
     // ── Schema migrations (idempotent ALTER TABLE) ────────────────────────────
 
     public static readonly string[] Migrations =
@@ -223,6 +295,7 @@ internal static class SqlQueries
         "ALTER TABLE task_history ADD COLUMN comparison_group_id TEXT",
         "ALTER TABLE task_history ADD COLUMN source_tag TEXT",
         "CREATE INDEX IF NOT EXISTS idx_task_source_tag ON task_history(source_tag)",
+        "ALTER TABLE notes_file_index ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
     ];
 
     // ── task_history ──────────────────────────────────────────────────────────

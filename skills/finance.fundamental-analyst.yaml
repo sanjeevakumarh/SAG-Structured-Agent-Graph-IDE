@@ -81,7 +81,7 @@ implementation:
       Dividend yield and payout ratio (if applicable). Buyback authorisation and history.
 
       Cite specific numbers from the source material for every metric.
-      If a metric is absent from sources, write "Data unavailable" — do NOT estimate.
+      If a metric is absent from sources, write "[DATA UNAVAILABLE]" (this exact marker) — do NOT estimate or use prose like "not available".
 
       **Signal: OVERVALUED / FAIRLY VALUED / UNDERVALUED** — one sentence rationale.
 

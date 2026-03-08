@@ -1,13 +1,13 @@
 # yaml-language-server: $schema=../docs/prompt-schema.json
 name: weekly-robotics-catchup
-version: 4
+version: 11
 domain: robotics
 source_tag: robotics_weekly
 schedule: "0 9 * * 1"
 
 description: >
-  Weekly digest of robotics developments — chipsets, software frameworks, hardware,
-  research papers — cross-referenced with active projects. Runs every Monday at 9am.
+  Weekly digest of robotics and related technology developments — hardware, software,
+  AI/ML, embedded systems, vision models, research papers. Runs every Monday at 9am.
 
 model_preference:
   orchestrator: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
@@ -17,121 +17,178 @@ model_preference:
     paper_scan: ollama/qwen2.5:14b-instruct-q5_K_M@workstation
 
 variables:
-  max_results: "6"
+  max_results: "10"
 
 data_collection:
   steps:
     - name: fetch_hardware_news
       type: web_search_batch
-      query: "robotics chipset edge AI hardware announcement {{date}}"
+      query: "robotics AI hardware accelerator LiDAR Arduino ESP32 Hailo Jetson new 2025 2026"
       limit: "{{max_results}}"
       output_var: hardware_news
 
     - name: fetch_software_news
       type: web_search_batch
-      query: "ROS2 OpenCV PyTorch TensorRT release update {{date}}"
+      query: "robotics software framework ROS OpenCV PyTorch release update news 2025 2026"
       limit: "{{max_results}}"
       output_var: software_news
 
-    - name: fetch_arxiv_ro
+    - name: fetch_research_news
       type: web_search_batch
-      query: "site:semanticscholar.org OR site:paperswithcode.com robotics perception edge deployment {{date}}"
+      query: "robotics automation AI VLM vision language model research news 2025 2026"
       limit: "{{max_results}}"
-      output_var: arxiv_ro
+      output_var: research_news
 
-    - name: fetch_arxiv_cv
+    - name: fetch_adjacent_tech
       type: web_search_batch
-      query: "site:semanticscholar.org OR site:paperswithcode.com computer vision multi-camera real-time inference {{date}}"
+      query: "SLM small language model VLM edge inference ONNX TensorRT robotics embedded 2025 2026"
       limit: "{{max_results}}"
-      output_var: arxiv_cv
+      output_var: adjacent_tech_news
 
-    - name: load_project_context
-      type: read_file
-      source: "~/projects/robotics/KNOWLEDGE_BASE.md"
-      output_var: project_context
+    - name: fetch_papers
+      type: web_search_batch
+      query: "robotics perception SLAM computer vision edge AI research paper 2025 2026"
+      limit: "{{max_results}}"
+      output_var: paper_results
+      optional_output: true
 
 subtasks:
   - name: hardware_scan
     model: "{{model_preference.subtasks.hardware_scan}}"
-    input_vars: [hardware_news, project_context]
+    input_vars: [hardware_news]
     prompt_template: |
-      Review these hardware/chipset developments from the past week:
+      You are a robotics hardware analyst. Review these search results from the past week:
+
       {{hardware_news}}
 
-      My current projects: {{project_context}}
+      Focus areas: edge AI processors (Hailo, Jetson, Coral), Arduino/ESP32, FPGA, LiDAR/depth sensors, actuators, robot platforms, development kits, embedded compute boards.
 
-      Identify:
-      1. New chips/boards relevant to edge robotics
-      2. Price/performance changes in existing hardware
-      3. Anything relevant to my specific projects
-      4. Hyperlinks
-      Output as structured JSON.
+      Write a concise plain-text summary using bullet points. Include ANY item related to:
+      - New compute boards, chips, or AI accelerators
+      - LiDAR, depth cameras, or perception sensors
+      - Robot platforms, arms, or development kits
+      - Embedded AI hardware or edge devices
+
+      For each item include:
+      - What it is and what's new
+      - Why it matters for robotics
+      - Source URL
+
+      If the search results contain no relevant hardware items, write exactly:
+      [NO RELEVANT HARDWARE NEWS THIS WEEK]
+
+      Do NOT output JSON. Do NOT fabricate items not in the search results.
+      Include items even if they are tangentially related to robotics hardware.
 
   - name: software_scan
     model: "{{model_preference.subtasks.software_scan}}"
-    input_vars: [software_news, project_context]
+    input_vars: [software_news, research_news, adjacent_tech_news]
     prompt_template: |
-      Review these software/framework developments:
+      You are a robotics software analyst. Review these search results:
+
+      ## Software & Frameworks:
       {{software_news}}
 
-      My stack: ROS2, OpenCV, PyTorch, TensorRT
-      Projects: {{project_context}}
+      ## Research & Breakthroughs:
+      {{research_news}}
 
-      Identify:
-      1. New releases or breaking changes in my stack
-      2. New tools/libraries worth evaluating
-      3. Deprecations or migrations I should plan for
-      4. Hyperlinks
-      Output as structured JSON.
+      ## Adjacent Technologies (inference, deployment, optimization):
+      {{adjacent_tech_news}}
+
+      My stack: ROS2, OpenCV, PyTorch, TensorRT.
+      Research areas: computer vision for robotics, perception systems, edge deployment, multi-camera systems.
+
+      Write a concise plain-text summary using bullet points. Cover:
+      1. New releases or breaking changes in ROS2, OpenCV, PyTorch, TensorRT, or related frameworks
+      2. New tools/libraries worth evaluating (simulation, deployment, optimization, inference)
+      3. Notable research relevant to robotics, computer vision, and edge AI
+      4. Adjacent tech: new inference engines, model optimization tools, embedded AI frameworks
+      5. Deprecations or migrations to plan for
+
+      For each item include a source URL.
+      If a category has no relevant items, write: [NO UPDATES]
+
+      Do NOT output JSON. Do NOT fabricate items not in the search results.
+      Only include items from the last 30 days. Ignore old forum posts or Q&A threads.
 
   - name: paper_scan
     model: "{{model_preference.subtasks.paper_scan}}"
-    input_vars: [arxiv_ro, arxiv_cv]
+    input_vars: [paper_results]
     prompt_template: |
-      Review these recent papers:
+      You are a robotics research analyst. Review these search results about recent papers:
 
-      ## Robotics / Perception:
-      {{arxiv_ro}}
+      {{paper_results}}
 
-      ## Computer Vision:
-      {{arxiv_cv}}
+      Research areas: computer vision for robotics, edge inference, perception systems,
+      multi-camera SLAM, real-time object detection, sim-to-real transfer.
 
-      My research areas: computer vision for robotics, perception systems,
-      edge deployment, multi-camera systems.
+      Write a concise plain-text summary using bullet points. For each paper/result:
+      - Title (if available, otherwise a descriptive label)
+      - Key contribution in one sentence
+      - Why it matters for edge robotics / ROS2+TensorRT pipelines
+      - Source URL
 
-      For each relevant paper:
-      1. One-sentence summary
-      2. Relevance to my work (high/medium/low)
-      3. Key technique or result
-      4. Should I read the full paper? (yes/no with reason)
-      5. Hyperlinks
-      Output as structured JSON.
+      Only include actual research papers, preprints, or technical reports. Exclude:
+      - Blog posts, opinion articles, news summaries
+      - Research group homepages or department pages
+      - Product announcements or marketing content
+
+      If the search results contain no relevant papers, write exactly:
+      [NO RELEVANT PAPERS FOUND]
+
+      Do NOT output JSON. Do NOT fabricate paper titles, authors, or details not present in the search results.
+
+  - name: weekly_briefing
+    model: "{{model_preference.orchestrator}}"
+    depends_on: [hardware_scan, software_scan, paper_scan]
+    input_vars: [hardware_scan_result, software_scan_result, paper_scan_result]
+    prompt_template: |
+      You are writing a weekly robotics briefing for an engineer who works on edge robotics with ROS2, OpenCV, PyTorch, and TensorRT.
+
+      Synthesize these three analyst reports into a single clean markdown briefing:
+
+      ### Hardware Report:
+      {{hardware_scan_result}}
+
+      ### Software & Research Report:
+      {{software_scan_result}}
+
+      ### Papers Report:
+      {{paper_scan_result}}
+
+      Write the briefing in this EXACT format (no other text before or after):
+
+      # Weekly Robotics Catchup — {{date}}
+
+      ## Executive Summary
+      (3-5 sentences highlighting the most important developments this week)
+
+      ## Action Items
+      - (Concrete things to do this week — evaluate, upgrade, read, test)
+
+      ## Key Developments
+      - (Need-to-know items with one-line description and source URL)
+
+      ## Trends to Watch
+      - (Emerging patterns across hardware, software, and research)
+
+      ## Papers & Research
+      - (Notable papers with key takeaway and URL. If none found, write "[No relevant papers this week]")
+
+      ## References
+      - (Deduplicated list of all sources as markdown links: [Title](URL))
+
+      RULES:
+      - Only include information present in the reports above. Never fabricate.
+      - If a section has no items, write "[Nothing notable this week]".
+      - Do NOT repeat the same item across multiple sections. Each item appears once in its best-fit section.
+      - Include a Hardware subsection under Key Developments if hardware items exist.
+      - Format all URLs as clickable markdown links: [Descriptive Title](https://url)
+      - In References, format each as: - [Article Title](URL)
+      - Be concise. No filler. Start with the heading immediately.
 
 synthesis:
-  prompt_template: |
-    # Weekly Robotics Catchup — {{date}}
-
-    # Executive Summary
-    Summarize highlights from software, hardware, and papers components under 100 words total from  {{hardware_scan_result}},  {{software_scan_result}}, {{paper_scan_result}}
-
-    # Body
-    Hardware: {{hardware_scan_result}}
-    Software: {{software_scan_result}}
-    Papers: {{paper_scan_result}}
-
-    # References
-    Extract Hyper links from  {{hardware_scan_result}},  {{software_scan_result}}, {{paper_scan_result}} and list them under references
-
-    Generate a weekly briefing in markdown:
-    ## Action Items (things to do this week)
-    ## Key Developments (need-to-know)
-    ## Papers to Read
-    ## Trends to Watch
-    ## Research Areas to Explore
-
-    Be concise. Prioritize by relevance to edge robotics and computer vision.
-
-    Dont include the prompt text thats not mentioned in one of the sections above. 
+  prompt_template: "{{weekly_briefing_result}}"
 
 output:
   format: markdown
