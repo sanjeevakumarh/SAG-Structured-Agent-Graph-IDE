@@ -16,7 +16,7 @@ blocks:
     ─────────────────────────────────────────────
     ## DATA INTEGRITY RULES
     1. Copy numbers verbatim from the source material above.
-    2. For any metric not found in sources, write "Data unavailable".
+    2. For any metric not found in sources, write "[DATA UNAVAILABLE]" — this EXACT marker with square brackets and all caps. Never use "Data unavailable", "N/A", "not available", or any other variant.
     3. Do NOT use training knowledge to fill data gaps.
     ─────────────────────────────────────────────
 
@@ -43,7 +43,7 @@ blocks:
     ## DATA INTEGRITY RULES
     1. Extract ONLY information explicitly present in the source material above.
     2. Do NOT invent dates, percentages, numbers, or names not stated in the data.
-    3. For any metric or fact not found in the data, write "[Data unavailable]".
+    3. For any metric or fact not found in the data, write "[DATA UNAVAILABLE]".
     4. Do NOT use training knowledge to fill gaps.
     5. Dates and numbers MUST be quoted verbatim from the source material.
     ─────────────────────────────────────────────

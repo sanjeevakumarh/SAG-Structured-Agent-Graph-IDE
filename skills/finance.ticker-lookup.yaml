@@ -1,0 +1,63 @@
+# yaml-language-server: $schema=../docs/skill-schema.json
+name: ticker-lookup
+version: 1
+domain: finance
+protocol_implements: [Collectible]
+
+description: >
+  Given a bare ticker symbol, resolves the full security details: asset type (stock/etf),
+  full company or fund name, exchange, and sector. This is the first step in any finance
+  workflow — downstream skills use these details for search disambiguation.
+
+inputs:
+  ticker:
+    type: string
+    required: true
+    description: Stock or ETF ticker symbol (e.g. KO, AAPL, JETS, SMH)
+
+outputs_schema:
+  type: object
+  description: >
+    JSON object with resolved security details:
+    { "ticker": "SMH", "asset_type": "etf", "full_name": "VanEck Semiconductor ETF",
+      "exchange": "NASDAQ", "sector": "Technology/Semiconductors" }
+
+capability_requirements:
+  fast_general:
+    needs: [instruction_following, structured_output]
+    context_window_min: 8k
+
+parameters:
+  ticker: "{{ticker}}"
+  output_var: ticker_info
+
+implementation:
+  - name: lookup_search
+    type: web_search_batch
+    query: "{{parameters.ticker | string.upcase}} stock OR ETF ticker overview"
+    limit: "10"
+    output_var: ticker_search_results
+
+  - name: extract_details
+    type: llm
+    model: "{{capability.fast_general}}"
+    prompt_template: |
+      You are a financial data extractor. Given web search results about a ticker symbol,
+      extract the security details.
+
+      Ticker: {{parameters.ticker | string.upcase}}
+
+      Search results:
+      ---
+      {{ticker_search_results}}
+      ---
+
+      From the search results above, determine:
+      1. **asset_type**: Is this a "stock" or "etf"? Look for keywords like "ETF", "Fund", "Index" → etf. Look for "Inc", "Corp", "Ltd", company descriptions → stock.
+      2. **full_name**: The full official name of the company or fund. For ETFs, include the fund family name (e.g. "VanEck Semiconductor ETF", "US Global Jets ETF", "SPDR S&P 500 ETF Trust"). For stocks, use the legal entity name (e.g. "Microsoft Corporation", "Apple Inc.").
+      3. **exchange**: The primary listing exchange (NYSE, NASDAQ, AMEX, etc.)
+      4. **sector**: The primary sector or industry (e.g. "Technology/Semiconductors", "Consumer Staples/Beverages", "Airlines/Transportation")
+
+      Return ONLY a JSON object — no explanation, no markdown fences:
+      {"ticker": "{{parameters.ticker | string.upcase}}", "asset_type": "stock_or_etf", "full_name": "Full Official Name", "exchange": "EXCHANGE", "sector": "Sector/Industry"}
+    output_var: "{{parameters.output_var}}"

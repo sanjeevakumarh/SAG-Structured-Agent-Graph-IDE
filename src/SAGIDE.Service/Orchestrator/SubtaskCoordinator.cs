@@ -250,11 +250,17 @@ public sealed class SubtaskCoordinator
         Dictionary<string, string>? overrides)
     {
         var now = DateTime.UtcNow;
+        var weekStart = now.AddDays(-(int)now.DayOfWeek);
+        var weekEnd   = weekStart.AddDays(6);
         var vars = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
         {
-            ["date"]      = now.ToString("yyyy-MM-dd"),
-            ["datestamp"] = now.ToString("yyyy-MM-dd-HH-mm"),
-            ["datetime"]  = now.ToString("O"),
+            ["date"]          = now.ToString("yyyy-MM-dd"),
+            ["datestamp"]     = now.ToString("yyyy-MM-dd-HH-mm"),
+            ["datetime"]      = now.ToString("O"),
+            ["today"]         = now.ToString("MMMM d, yyyy"),
+            ["current_year"]  = now.ToString("yyyy"),
+            ["current_month"] = now.ToString("MMMM yyyy"),
+            ["current_week"]  = $"{weekStart:MMMM d}–{weekEnd:MMMM d}, {now:yyyy}",
         };
 
         foreach (var kv in prompt.Variables)
@@ -327,21 +333,32 @@ public sealed class SubtaskCoordinator
     {
         if (prompt.DataCollection is null) return;
 
-        // Phase 2: Expand skill: references into their concrete implementation steps.
-        // The expanded list replaces the original; _expandedSkillMap is populated for Phase 3 validation.
-        var steps = _skillRegistry is not null
-            ? ExpandSkillRefs(prompt.DataCollection.Steps, vars)
-            : prompt.DataCollection.Steps;
+        // Phase 2: Expand skill references lazily — each skill step is expanded just before
+        // execution so it can reference vars populated by earlier steps (e.g. json_extract
+        // promoting full_name into vars before stock-data-track uses it as fund_name).
+        // Build a queue of steps; skill refs are expanded inline just before their turn.
+        var stepQueue = new Queue<PromptDataCollectionStep>(prompt.DataCollection.Steps);
+        var executionPlan = new List<object>(); // for tracing
 
-        // Trace the expanded step list so operators can immediately see what will run.
-        tracer.Write("data-collection-plan", new
+        // Process the queue: expand skill refs on-demand, execute immediately
+        while (stepQueue.Count > 0)
         {
-            step_count = steps.Count,
-            steps = steps.Select(s => new { s.Name, s.Type, skill = s.Skill ?? "(none)", output_var = s.OutputVar ?? "(none)" }).ToList(),
-        });
+            var raw = stepQueue.Dequeue();
 
-        foreach (var step in steps)
-        {
+            // If this is a skill reference, expand it now (with current vars) and enqueue the results
+            if (!string.IsNullOrWhiteSpace(raw.Skill) && _skillRegistry is not null)
+            {
+                var expanded = ExpandSkillRefs([raw], vars);
+                // Re-enqueue expanded steps at the front (prepend)
+                var remaining = new List<PromptDataCollectionStep>(expanded);
+                while (stepQueue.Count > 0) remaining.Add(stepQueue.Dequeue());
+                stepQueue = new Queue<PromptDataCollectionStep>(remaining);
+                continue;
+            }
+
+            var step = raw;
+            executionPlan.Add(new { step.Name, step.Type, skill = step.Skill ?? "(none)", output_var = step.OutputVar ?? "(none)" });
+
             _logger.LogDebug("Data collection: {Name} ({Type})", step.Name, step.Type);
             using var stepActivity = _activitySource.StartActivity($"step.{step.Name}");
             stepActivity?.SetTag("step.type", step.Type);
@@ -381,6 +398,13 @@ public sealed class SubtaskCoordinator
                     vars[step.OutputVar] = string.Empty;
             }
         }
+
+        // Write the final execution plan trace (after all lazy expansions)
+        tracer.Write("data-collection-plan", new
+        {
+            step_count = executionPlan.Count,
+            steps = executionPlan,
+        });
     }
 
     // ── Data quality guard ───────────────────────────────────────────────────────
@@ -617,6 +641,8 @@ public sealed class SubtaskCoordinator
             SectionTitle          = Render(src.SectionTitle),
             PromptTemplate        = src.PromptTemplate, // intentional pass-through (rendered at execution)
             InputVars             = [..src.InputVars],
+            FetchPages            = src.FetchPages,
+            MaxCharsPerPage       = src.MaxCharsPerPage,
         };
     }
 
@@ -701,6 +727,12 @@ public sealed class SubtaskCoordinator
         RunTracer tracer,
         CancellationToken ct)
     {
+        // Inject step parameters into vars so templates can reference {{parameters.X}}.
+        // This is essential for expanded skill steps whose prompt_template and planning_prompt
+        // reference {{parameters.ticker}}, {{parameters.fund_name}}, etc.
+        if (step.Parameters.Count > 0)
+            vars["parameters"] = step.Parameters;
+
         switch (step.Type.Trim().ToLowerInvariant())
         {
             case "read_file":
@@ -720,6 +752,53 @@ public sealed class SubtaskCoordinator
                 if (string.IsNullOrWhiteSpace(url)) return string.Empty;
                 var doc = await _fetcher.FetchUrlAsync(url, ct);
                 return doc.Body;
+            }
+
+            // Like web_api but extracts readable text from HTML.
+            // Use for fetching known URLs (e.g. Yahoo Finance quote pages) where
+            // the URL is deterministic and search is unnecessary.
+            case "web_fetch":
+            {
+                var urlTemplate = ResolveSimpleTemplate(step.Source ?? string.Empty, vars);
+                if (string.IsNullOrWhiteSpace(urlTemplate)) return string.Empty;
+
+                var maxChars = step.MaxCharsPerPage > 0 ? step.MaxCharsPerPage : 4000;
+                var items = string.IsNullOrWhiteSpace(step.IterateOver)
+                    ? (IEnumerable<string>)[urlTemplate]
+                    : ResolveCollection(step.IterateOver, vars)
+                        .Select(item => urlTemplate
+                            .Replace("{{symbol}}", item).Replace("{symbol}", item)
+                            .Replace("{{item}}", item).Replace("{item}", item));
+
+                var sections = new List<string>();
+                foreach (var url in items.Take(10))
+                {
+                    try
+                    {
+                        using var pageCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                        pageCts.CancelAfter(TimeSpan.FromSeconds(15));
+
+                        var doc = await _fetcher.FetchUrlAsync(url, pageCts.Token);
+                        var text = await HtmlTextExtractor.ExtractAsync(doc.Body, maxChars);
+
+                        if (!string.IsNullOrWhiteSpace(text) && text.Length > 100)
+                        {
+                            sections.Add($"## Page: {url}\n{text}");
+                            _logger.LogInformation("web_fetch '{Name}': extracted {Chars} chars from {Url}",
+                                step.Name, text.Length, url);
+                        }
+                        else
+                        {
+                            _logger.LogWarning("web_fetch '{Name}': no usable text from {Url}", step.Name, url);
+                        }
+                    }
+                    catch (Exception ex) when (!ct.IsCancellationRequested)
+                    {
+                        _logger.LogWarning(ex, "web_fetch '{Name}': failed to fetch {Url}", step.Name, url);
+                    }
+                }
+
+                return string.Join("\n\n---\n\n", sections);
             }
 
             case "rss":
@@ -804,7 +883,12 @@ public sealed class SubtaskCoordinator
                         .Replace("{item}",     item);
 
                     _logger.LogDebug("web_search_batch '{Name}': querying '{Query}'", step.Name, query);
-                    var result = await _search.SearchAsync(query, maxResults, prompt.Domain, ct);
+                    var fetchPages      = step.FetchPages;
+                    var maxCharsPerPage = step.MaxCharsPerPage > 0 ? step.MaxCharsPerPage : 3000;
+                    var result = fetchPages > 0
+                        ? await _search.SearchWithPageContentAsync(
+                            query, maxResults, fetchPages, maxCharsPerPage, prompt.Domain, ct)
+                        : await _search.SearchAsync(query, maxResults, prompt.Domain, ct);
                     if (!string.IsNullOrWhiteSpace(result))
                         sections.Add($"## Search: {query}\n{result}");
                 }
@@ -913,7 +997,12 @@ public sealed class SubtaskCoordinator
                 {
                     qi++;
                     _logger.LogDebug("llm_queries '{Name}': searching '{Query}'", step.Name, query);
-                    var searchResult = await _search.SearchAsync(query, maxResults, prompt.Domain, ct);
+                    var fetchPages      = step.FetchPages;
+                    var maxCharsPerPage = step.MaxCharsPerPage > 0 ? step.MaxCharsPerPage : 3000;
+                    var searchResult = fetchPages > 0
+                        ? await _search.SearchWithPageContentAsync(
+                            query, maxResults, fetchPages, maxCharsPerPage, prompt.Domain, ct)
+                        : await _search.SearchAsync(query, maxResults, prompt.Domain, ct);
                     tracer.Write($"step-{step.Name}-search-q{qi:D2}", new
                     {
                         query,
@@ -1168,6 +1257,73 @@ public sealed class SubtaskCoordinator
                 var context = await _ragPipeline.GetRelevantContextAsync(query, topK, sourceTag, ct);
                 tracer.WriteText($"step-{step.Name}-result", context);
                 return context;
+            }
+
+            case "json_extract":
+            {
+                // Parses a JSON string from a named variable and promotes its fields into the var context.
+                // Config: source_var (the var containing JSON), fields (optional list of field names to extract).
+                // If fields is omitted, all top-level string fields are extracted.
+                var sourceVar = step.Source
+                    ?? step.Parameters.GetValueOrDefault("source_var")?.ToString()
+                    ?? string.Empty;
+                if (string.IsNullOrEmpty(sourceVar) || !vars.TryGetValue(sourceVar, out var jsonObj)
+                    || string.IsNullOrWhiteSpace(jsonObj?.ToString()))
+                {
+                    _logger.LogWarning("json_extract step '{Name}': source var '{Var}' is empty", step.Name, sourceVar);
+                    return string.Empty;
+                }
+
+                var jsonStr = jsonObj.ToString()!.Trim();
+                // Strip markdown code fences if present
+                if (jsonStr.StartsWith("```"))
+                {
+                    var firstNewline = jsonStr.IndexOf('\n');
+                    if (firstNewline > 0) jsonStr = jsonStr[(firstNewline + 1)..];
+                    if (jsonStr.EndsWith("```")) jsonStr = jsonStr[..^3].TrimEnd();
+                }
+
+                try
+                {
+                    using var doc = JsonDocument.Parse(jsonStr);
+                    var root = doc.RootElement;
+                    if (root.ValueKind != JsonValueKind.Object)
+                    {
+                        _logger.LogWarning("json_extract step '{Name}': expected JSON object, got {Kind}", step.Name, root.ValueKind);
+                        return jsonStr;
+                    }
+
+                    var extracted = new List<string>();
+                    foreach (var prop in root.EnumerateObject())
+                    {
+                        if (prop.Value.ValueKind is JsonValueKind.String or JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False)
+                        {
+                            vars[prop.Name] = prop.Value.ToString();
+                            extracted.Add($"{prop.Name}={prop.Value}");
+                        }
+                    }
+
+                    // Apply field aliases: parameters like "fund_name: full_name" mean
+                    // "also set vars[fund_name] = vars[full_name]"
+                    foreach (var kv in step.Parameters)
+                    {
+                        if (kv.Key is "source_var" or "source") continue;
+                        var aliasTarget = kv.Value?.ToString() ?? string.Empty;
+                        if (vars.TryGetValue(aliasTarget, out var aliasVal))
+                        {
+                            vars[kv.Key] = aliasVal;
+                            extracted.Add($"{kv.Key}={aliasVal} (alias of {aliasTarget})");
+                        }
+                    }
+
+                    _logger.LogInformation("json_extract step '{Name}': extracted [{Fields}]", step.Name, string.Join(", ", extracted));
+                    tracer.Write($"step-{step.Name}-extracted", new { source = sourceVar, fields = extracted });
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogWarning(ex, "json_extract step '{Name}': failed to parse JSON from '{Var}'", step.Name, sourceVar);
+                }
+                return jsonStr;
             }
 
             default:

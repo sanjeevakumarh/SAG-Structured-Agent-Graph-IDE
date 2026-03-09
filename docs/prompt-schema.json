@@ -166,8 +166,8 @@
         },
         "type": {
           "type": "string",
-          "enum": ["read_file", "web_api", "web_api_batch", "filter", "web_search_batch", "llm_queries", "llm_per_section", "skill", "llm", "vector_search"],
-          "description": "Step type determines which collector runs. 'skill' expands a named skill. 'llm' submits a single free-form LLM call and stores the result. 'vector_search' queries the RAG vector store by source_tag."
+          "enum": ["read_file", "web_api", "web_api_batch", "filter", "web_search_batch", "llm_queries", "llm_per_section", "skill", "llm", "vector_search", "json_extract"],
+          "description": "Step type determines which collector runs. 'skill' expands a named skill. 'llm' submits a single free-form LLM call and stores the result. 'vector_search' queries the RAG vector store by source_tag. 'json_extract' parses a JSON variable and promotes its fields into the var context."
         },
         "skill": {
           "type": "string",

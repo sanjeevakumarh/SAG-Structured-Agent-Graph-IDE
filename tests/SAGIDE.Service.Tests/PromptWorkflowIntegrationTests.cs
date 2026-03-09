@@ -175,35 +175,36 @@ public class PromptWorkflowIntegrationTests : IDisposable
     }
 
     // ── stock-analysis ────────────────────────────────────────────────────────
-    // Objects: stock_data (finance/stock-data-track)
-    // Workflow: stock_data.collect
-    // Pre-existing data_collection: load_personal_context + run_analyses (2 steps)
+    // All steps inline in data_collection (no objects/workflow expansion needed):
+    //   ticker_lookup, extract_ticker_details, stock_data_collect,
+    //   load_personal_context, run_analyses (5 total)
     // Pre-existing subtasks: assembler (inline)
-    // Expected: 1+2=3 data steps, 0 workflow subtasks (inline assembler gives 1 total)
 
     [SkippableFact]
-    public void StockAnalysis_Expand_HasThreeDataSteps()
+    public void StockAnalysis_Expand_HasFiveDataSteps()
     {
         var prompt = LoadPrompt("finance", "stock-analysis");
         WorkflowExpander.Expand(prompt, _skills, NullLogger.Instance);
 
-        Assert.Equal(3, prompt.DataCollection!.Steps.Count);
+        Assert.Equal(5, prompt.DataCollection!.Steps.Count);
     }
 
     [SkippableFact]
-    public void StockAnalysis_Expand_CollectStepPrependedFirst_WithCorrectOutputVar()
+    public void StockAnalysis_Expand_TickerLookupFirst_StockDataCollectThird()
     {
         var prompt = LoadPrompt("finance", "stock-analysis");
         WorkflowExpander.Expand(prompt, _skills, NullLogger.Instance);
 
         var steps = prompt.DataCollection!.Steps;
-        Assert.Equal("stock_data.collect", steps[0].Name);
-        Assert.Equal("skill",              steps[0].Type);
-        Assert.Equal("finance/stock-data-track", steps[0].Skill);
-        Assert.Equal("all_search_results", steps[0].OutputVar);
-        // Pre-existing steps follow
-        Assert.Equal("load_personal_context", steps[1].Name);
-        Assert.Equal("run_analyses",          steps[2].Name);
+        Assert.Equal("ticker_lookup",          steps[0].Name);
+        Assert.Equal("skill",                  steps[0].Type);
+        Assert.Equal("finance/ticker-lookup",  steps[0].Skill);
+        Assert.Equal("ticker_info",            steps[0].OutputVar);
+        Assert.Equal("extract_ticker_details", steps[1].Name);
+        Assert.Equal("stock_data_collect",     steps[2].Name);
+        Assert.Equal("all_search_results",     steps[2].OutputVar);
+        Assert.Equal("load_personal_context",  steps[3].Name);
+        Assert.Equal("run_analyses",           steps[4].Name);
     }
 
     [SkippableFact]

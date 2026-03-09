@@ -74,12 +74,13 @@ public class WebSearchAdapterTests
             })
             .Build();
 
-    // Minimal SearXNG JSON with two results
+    // Minimal SearXNG JSON with two results — snippets must contain query terms
+    // so the relevance check passes (prevents false "irrelevant results" rejection)
     private const string TwoResultsJson = """
         {
           "results": [
-            { "title": "Result One", "url": "https://example.com/1", "content": "Snippet one" },
-            { "title": "Result Two", "url": "https://example.com/2", "content": "Snippet two" }
+            { "title": "Result One", "url": "https://example.com/1", "content": "Test query result snippet one with cached hello world" },
+            { "title": "Result Two", "url": "https://example.com/2", "content": "Test query result snippet two with cached hello world" }
           ]
         }
         """;
@@ -172,7 +173,7 @@ public class WebSearchAdapterTests
 
         Assert.Contains("[1] Result One",        result);
         Assert.Contains("URL: https://example.com/1", result);
-        Assert.Contains("Snippet one",           result);
+        Assert.Contains("snippet one",           result);
         Assert.Contains("[2] Result Two",        result);
     }
 
@@ -291,9 +292,9 @@ public class WebSearchAdapterTests
         var json = """
             {
               "results": [
-                { "title": "R1", "url": "https://a.com", "content": "s1" },
-                { "title": "R2", "url": "https://b.com", "content": "s2" },
-                { "title": "R3", "url": "https://c.com", "content": "s3" }
+                { "title": "R1", "url": "https://a.com", "content": "q relevant snippet" },
+                { "title": "R2", "url": "https://b.com", "content": "q relevant snippet" },
+                { "title": "R3", "url": "https://c.com", "content": "q relevant snippet" }
               ]
             }
             """;

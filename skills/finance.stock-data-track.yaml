@@ -5,8 +5,9 @@ domain: finance
 protocol_implements: [Collectible]
 
 description: >
-  Generates 8 targeted stock research queries across 4 tracks (technical, fundamental,
-  competitive, catalysts) via an LLM planner, then executes them via web search.
+  Two-phase data collection: (1) deterministic fetch of known finance pages
+  (Yahoo Finance quote + statistics), then (2) LLM-planned search queries for
+  competitive landscape, news, and analyst opinions.
   The primary data-gathering primitive for financial analysis workflows.
 
 inputs:
@@ -22,6 +23,10 @@ inputs:
     type: string
     required: false
     description: "stock | etf — prompts adapt accordingly (default: stock)"
+  fund_name:
+    type: string
+    required: false
+    description: "Full fund/company name for search disambiguation (e.g. 'US Global Jets Fund', 'VanEck Semiconductor ETF'). Critical for ETFs with ambiguous tickers."
   context:
     type: string
     required: false
@@ -34,8 +39,9 @@ inputs:
 outputs_schema:
   type: string
   description: >
-    Concatenated search results across all 8 queries grouped by track.
-    Each section headed "## Search: <query>".
+    Three separate vars: yahoo_quote_data (quote page), stockanalysis_data
+    (income statement), search_results (discovery queries with page content).
+    Consumers should reference all three vars directly.
 
 capability_requirements:
   fast_general:
@@ -46,52 +52,84 @@ parameters:
   ticker: "{{ticker}}"
   exchange: ""
   asset_type: "stock"
+  fund_name: ""
   context: "General investor"
   max_results: "8"
   output_var: all_search_results
 
 implementation:
+  # ── Phase 1: Deterministic fetch — known URLs, no search needed ──────────
+  # These pages have structured financial data (price, P/E, revenue, balance sheet).
+  - name: direct_data
+    type: web_fetch
+    source: "https://finance.yahoo.com/quote/{{parameters.ticker | string.upcase}}/"
+    max_chars_per_page: 4000
+    output_var: yahoo_quote_data
+
+  - name: direct_stats
+    type: web_fetch
+    source: "https://stockanalysis.com/stocks/{{parameters.ticker | string.upcase}}/financials/"
+    max_chars_per_page: 4000
+    output_var: stockanalysis_data
+
+  # ── Phase 2: LLM-planned search — discovery queries for non-deterministic data ──
   - name: search
     type: llm_queries
     model: "{{capability.fast_general}}"
     planning_prompt: |
-      You are planning web research for a deep-dive {{parameters.asset_type}} analysis.
+      You are planning web search queries for {{parameters.asset_type}} research.
       Ticker: {{parameters.ticker | string.upcase}}
-      {{ if parameters.exchange != "" -}}
-      Exchange: {{parameters.exchange}}
-      Qualified identifier: {{parameters.exchange}}: {{parameters.ticker | string.upcase}}
+      Asset type: {{parameters.asset_type}}
+      {{ if parameters.fund_name != "" -}}
+      Full name: {{parameters.fund_name}}
       {{- end }}
-      Analyst context: {{parameters.context}}
-      Date: {{date}}
+      Context: {{parameters.context}}
+      Today: {{today}} (week of {{current_week}})
 
-      Generate exactly 8 targeted search queries, 2 per track below:
+      NOTE: We already have quote data and financial statements from Yahoo Finance
+      and StockAnalysis. Do NOT search for basic price, P/E, revenue, or earnings data.
 
-      Track 1 — Technical Analysis
-        · Current price, 52-week range, RSI, MACD, moving averages (50-day, 200-day)
-        · Key support/resistance levels, chart patterns, volume trends
+      Generate exactly 6 search queries across these tracks:
 
-      Track 2 — Fundamental Analysis
-        · Latest earnings: revenue, EPS, guidance, analyst consensus
-        · Valuation ratios (P/E, P/B, EV/EBITDA vs sector), balance sheet (debt, FCF, dividend/buyback)
+      Track 1 — Competitive landscape (2 queries): competitors, market share, sector comparison
+      Track 2 — News & catalysts (2 queries): recent news, upcoming events, earnings calls
+      Track 3 — Analyst opinions (1 query): ratings, price targets, upgrades/downgrades
+      Track 4 — Technical indicators (1 query): RSI, MACD, moving averages, support/resistance
 
-      Track 3 — Competitive Landscape
-        · Market share, top 3 competitors, recent competitive moves
-        · Industry trends, disruption risks, new entrants, moat sustainability
-
-      Track 4 — News & Catalysts
-        · Analyst upgrades/downgrades and price target changes ({{date}})
-        · Upcoming events, insider activity, institutional positioning, short interest
-
-      Rules:
-      {{ if parameters.exchange != "" -}}
-      - EVERY query must use the qualified form "{{parameters.exchange}}: {{parameters.ticker | string.upcase}} {{parameters.asset_type}}" (e.g. "NASDAQ: COIN stock price") — never the bare ticker alone, which is ambiguous
-      {{- else -}}
-      - EVERY query must include "{{parameters.ticker | string.upcase}} stock" for stocks or "{{parameters.ticker | string.upcase}} ETF" for ETFs — never the bare ticker alone
+      ## QUERY FORMAT RULES
+      1. Each query MUST be SHORT: 5-9 words maximum.
+      2. ALWAYS use the TICKER (e.g. "MSFT") not the full company name.
+         "Microsoft Corporation stock" returns microsoft.com homepage.
+         "MSFT stock" returns finance sites.
+      {{ if parameters.fund_name != "" -}}
+         Exception: for ambiguous tickers, add "{{parameters.fund_name}}" to disambiguate.
       {{- end }}
-      - Include {{date}} or the current year in at least 5 queries for recency
-      - Let the analyst's context shape query angles
+      3. Use simple concrete terms. AVOID jargon: "price action", "trends", "analysis",
+         "outlook", "valuation multiples" are filler words.
+      4. NEVER use "site:", "NASDAQ:", or "NYSE:" prefixes.
+      5. Put the ticker FIRST in every query.
 
-      Return ONLY a valid JSON array of exactly 8 strings. No explanation, no markdown:
-      ["query1", "query2", "query3", "query4", "query5", "query6", "query7", "query8"]
+      ## GOOD examples:
+      - "MSFT stock competitors market share"
+      - "MSFT stock news this week"
+      - "MSFT stock price target upgrade"
+      - "MSFT stock RSI MACD"
+      - "KO stock sector comparison peers"
+      - "NVDA stock earnings call guidance"
+
+      ## BAD examples:
+      - "MSFT yahoo finance quote" ← we already have this data, don't search for it
+      - "MSFT stock P/E ratio revenue" ← we already have this from Yahoo Finance
+      - "Microsoft Corporation stock price" ← full company name returns homepage
+      - "analyst ratings MSFT" ← "analyst" first → dictionary definition
+
+      Return ONLY a JSON array of exactly 6 strings — no explanation:
+      ["query1", "query2", "query3", "query4", "query5", "query6"]
     limit: "{{parameters.max_results}}"
-    output_var: "{{parameters.output_var}}"
+    fetch_pages: 2
+    max_chars_per_page: 3000
+    output_var: search_results
+
+  # No combine step — yahoo_quote_data, stockanalysis_data, and search_results
+  # are passed as separate vars to downstream consumers. An LLM combine step
+  # was lossy (compressed 49KB → 1.2KB, losing all financial data).

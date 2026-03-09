@@ -94,7 +94,7 @@ public class PromptDataCollectionStep
 {
     public string Name { get; set; } = string.Empty;
 
-    /// <summary>Step type: read_file | web_api | web_api_batch | filter | web_search_batch | llm_queries | llm_per_section</summary>
+    /// <summary>Step type: read_file | web_api | web_api_batch | web_fetch | filter | web_search_batch | llm_queries | llm_per_section</summary>
     public string Type { get; set; } = string.Empty;
 
     /// <summary>URL or file path (may contain {{template}} expressions).</summary>
@@ -125,6 +125,18 @@ public class PromptDataCollectionStep
     /// the run context so downstream prompts can acknowledge what is unavailable.
     /// </summary>
     public bool OptionalOutput { get; set; }
+
+    /// <summary>
+    /// Number of top search result pages to fetch and extract text from.
+    /// 0 (default) = snippet-only. When > 0, actual page content is fetched,
+    /// HTML-stripped, and appended to search results. Typically 1-2 is sufficient.
+    /// </summary>
+    public int FetchPages { get; set; }
+
+    /// <summary>
+    /// Maximum characters of extracted text per fetched page. Default 3000.
+    /// </summary>
+    public int MaxCharsPerPage { get; set; }
 
     /// <summary>
     /// Reference to a named skill in the skills/ library (e.g. "research/web-research-track"

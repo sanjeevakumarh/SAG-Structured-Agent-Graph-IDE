@@ -74,7 +74,10 @@ implementation:
       {{parameters.query_guidance}}
       {{- end }}
       Rules:
-      - Every query MUST reference the core concept from "{{parameters.idea}}" — no generic queries
+      - Each query MUST be SHORT: 5-9 words maximum. Search engines fail on long queries.
+      - Every query MUST reference a DOMAIN-SPECIFIC phrase from "{{parameters.idea}}" — no generic queries
+      - NEVER lead with generic tech terms: "AI", "ML", "machine learning", "copilot", "chatbot",
+        "automation". These return generic AI homepages (OpenAI, Wikipedia). Lead with the DOMAIN keyword instead.
       - Include {{date}} or the current year in at least 3 queries
       - Return ONLY a valid JSON array of exactly {{parameters.num_queries}} strings. No explanation, no markdown:
       ["query1", "query2", ...]

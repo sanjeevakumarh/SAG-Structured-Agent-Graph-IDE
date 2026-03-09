@@ -295,8 +295,9 @@ public static class ServiceCollectionExtensions
             client.DefaultRequestHeaders.UserAgent.ParseAdd("SAGIDE/1.0");
         }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
         {
-            AllowAutoRedirect        = true,
-            MaxAutomaticRedirections = 10,
+            AllowAutoRedirect          = true,
+            MaxAutomaticRedirections   = 10,
+            AutomaticDecompression     = System.Net.DecompressionMethods.All,
         });
         services.AddHttpClient<WebSearchAdapter>();
         services.AddHttpClient<EmbeddingService>();

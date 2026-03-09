@@ -21,6 +21,18 @@ public static class SearchQualityScorer
         "rate limit exceeded", "too many requests",
     ];
 
+    /// <summary>Dictionary/definition domains that indicate the search engine couldn't find
+    /// domain-relevant content and fell back to word definitions.</summary>
+    private static readonly string[] DictionaryDomains =
+    [
+        "merriam-webster.com", "dictionary.com", "cambridge.org/dictionary",
+        "vocabulary.com", "collinsdictionary.com", "wordreference.com",
+        "thefreedictionary.com", "wiktionary.org", "yourdictionary.com",
+        "oxfordlearnersdictionaries.com", "oed.com/dictionary",
+        "definitions.net", "lexico.com", "macmillandictionary.com",
+        "/definition/", "/meaning/",
+    ];
+
     /// <summary>
     /// Scores search result text. Returns (score, reason).
     /// <list type="bullet">
@@ -44,6 +56,19 @@ public static class SearchQualityScorer
 
         if (resultCount == 0)
             return (0.0, "zero_results");
+
+        // Dictionary page detection: if >50% of URLs are dictionary domains,
+        // the search engine couldn't find relevant content for the query
+        var urlLines = resultText.Split('\n')
+            .Where(l => l.TrimStart().StartsWith("URL:", StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (urlLines.Length > 0)
+        {
+            var dictCount = urlLines.Count(line =>
+                DictionaryDomains.Any(d => line.Contains(d, StringComparison.OrdinalIgnoreCase)));
+            if (dictCount > urlLines.Length / 2)
+                return (0.1, "dictionary_dominated");
+        }
 
         // Very short content suggests blocked/truncated responses
         var avgCharsPerResult = resultText.Length / Math.Max(resultCount, 1);

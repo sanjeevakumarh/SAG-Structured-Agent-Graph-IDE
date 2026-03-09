@@ -47,26 +47,44 @@ variables:
   analyst_model_override: ""
   assembler_model_override: ""
 
-# ── Skill object: stock data track ─────────────────────────────────────────────
-objects:
-  - name: stock_data
-    skill: finance/stock-data-track
-    args:
-      ticker: "{{ticker}}"
-      exchange: "{{exchange}}"
-      asset_type: "{{asset_type}}"
-      context: "{{context}}"
-      max_results: "{{max_results}}"
-      output_var: all_search_results
-
-# ── Workflow: collect stock data ────────────────────────────────────────────────
-workflow:
-  - call: stock_data.collect
-
 # ── Data collection ────────────────────────────────────────────────────────────
+# Steps run sequentially. ticker-lookup runs first, json_extract promotes its fields
+# (asset_type, full_name, exchange, sector) into vars, then stock-data-track uses them.
 data_collection:
   steps:
-    # Step 1 — Search Logseq notes for personal investment context
+    # Step 0 — Look up ticker details (asset type, full name, exchange, sector)
+    - name: ticker_lookup
+      type: skill
+      skill: finance/ticker-lookup
+      parameters:
+        ticker: "{{ticker}}"
+      output_var: ticker_info
+
+    # Step 1 — Extract ticker details from lookup JSON into variables.
+    # Promotes: ticker, asset_type, full_name, exchange, sector into the var context.
+    # Alias: fund_name ← full_name (stock-data-track expects fund_name for ETF disambiguation)
+    - name: extract_ticker_details
+      type: json_extract
+      source: ticker_info
+      parameters:
+        fund_name: full_name
+      output_var: ticker_details_raw
+
+    # Step 2 — Collect stock research data using resolved ticker details.
+    # full_name and asset_type are now in vars from the json_extract step above.
+    - name: stock_data_collect
+      type: skill
+      skill: finance/stock-data-track
+      parameters:
+        ticker: "{{ticker}}"
+        exchange: "{{exchange}}"
+        asset_type: "{{asset_type}}"
+        fund_name: "{{full_name}}"
+        context: "{{context}}"
+        max_results: "{{max_results}}"
+      output_var: all_search_results
+
+    # Step 3 — Search Logseq notes for personal investment context
     - name: load_personal_context
       type: vector_search
       source: logseq_notes

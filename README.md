@@ -47,6 +47,12 @@ sequenceDiagram
 - Works cross-platform; service can be restarted independently of VS Code. Binary framing (4-byte length prefix) ensures message boundary integrity.
 - ProviderFactory routes tasks to 4 HTTP providers (Claude, Codex, Gemini), Ollama, or TensorRT-LLM with affinity-based server selection.
 
+## Updates (2026-03-09)
+- Finance stock analysis now starts with ticker lookup + json_extract, passes fund name/asset type into stock-data-track, and keeps yahoo_quote_data/stockanalysis_data/search_results as separate vars instead of one lossy blob.
+- Added web_fetch + HTML text extraction: auto-decompress responses, strip boilerplate with AngleSharp, and allow search steps to pull top result page content via fetchPages/maxCharsPerPage.
+- Search quality guardrails: filter dictionary URLs, relevance checks on SearXNG results, new today/current_week/month/year vars for prompts, and default appsettings disable search cache/engine overrides for predictable runs.
+- Schema/tests refresh: prompt schema accepts json_extract/web_fetch, new finance ticker-lookup skill, stock-analysis prompt rebuilt with inline steps, and search adapter tests updated for relevance fixtures.
+
 ## Updates (2026-03-07)
 - Logseq knowledge base pipeline — new notes indexer service with file index + vector store cleanup, API endpoints for search/stats/reindex, and markdown-aware chunking with task markers and source-tagged embeddings.
 - Search quality + caching — per-domain TTLs, SQLite-backed search cache with quality scoring, and web search adapter fallbacks; RAG vector store gains delete helpers for source URLs/tags.

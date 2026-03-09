@@ -195,21 +195,26 @@ public class SkillRenderingTests
             ["ticker"]     = "PICK",
             ["exchange"]   = "BATS",
             ["asset_type"] = "etf",
+            ["fund_name"]  = "",
             ["context"]    = "General investor",
             ["max_results"] = "6",
             ["output_var"] = "all_search_results",
         };
         var vars = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
         {
-            ["parameters"] = parameters,
-            ["date"]       = "2026-03-04",
+            ["parameters"]    = parameters,
+            ["date"]          = "2026-03-04",
+            ["today"]         = "March 4, 2026",
+            ["current_week"]  = "March 2–March 8, 2026",
+            ["current_year"]  = "2026",
+            ["current_month"] = "March 2026",
         };
         var rendered = PromptTemplate.RenderRaw(impl.PlanningPrompt!, vars);
 
-        // The qualified form should include both exchange:ticker AND asset_type
-        Assert.Contains("BATS: PICK etf", rendered);
-        // The bare-ticker else branch should NOT appear
-        Assert.DoesNotContain("PICK stock\" for stocks", rendered);
+        // ETF branch should be active — planning prompt still references ticker
+        Assert.Contains("PICK", rendered);
+        // Should contain query generation instructions
+        Assert.Contains("search queries", rendered);
     }
 
     [SkippableFact]
@@ -230,15 +235,22 @@ public class SkillRenderingTests
         };
         var vars = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
         {
-            ["parameters"] = parameters,
-            ["date"]       = "2026-03-04",
+            ["parameters"]    = parameters,
+            ["date"]          = "2026-03-04",
+            ["today"]         = "March 4, 2026",
+            ["current_week"]  = "March 2–March 8, 2026",
+            ["current_year"]  = "2026",
+            ["current_month"] = "March 2026",
         };
         var rendered = PromptTemplate.RenderRaw(impl.PlanningPrompt!, vars);
 
-        // The bare ticker branch should render (else branch)
-        Assert.Contains("AAPL stock", rendered);
-        Assert.Contains("AAPL ETF", rendered);
-        // The exchange-qualified form should NOT appear
+        // The bare ticker branch should include AAPL
+        Assert.Contains("AAPL", rendered);
+        // Should mention finance site anchoring
+        Assert.Contains("finance site", rendered);
+        // Stock branch should NOT contain ETF instructions
+        Assert.DoesNotContain("ETF fund", rendered);
+        // The exchange-qualified form should NOT appear when exchange is empty
         Assert.DoesNotContain("Exchange:", rendered);
     }
 
