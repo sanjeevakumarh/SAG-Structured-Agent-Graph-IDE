@@ -1,5 +1,6 @@
 using Scriban;
 using Scriban.Runtime;
+using SAGIDE.Contracts;
 using SAGIDE.Core.Models;
 
 namespace SAGIDE.Service.Prompts;

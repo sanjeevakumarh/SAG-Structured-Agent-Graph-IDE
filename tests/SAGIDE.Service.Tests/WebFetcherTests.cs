@@ -272,6 +272,33 @@ public class WebFetcherTests
         Assert.Equal(2, entries.Count);
     }
 
+    // ── FetchUrlAsync — cache TTL expiry ──────────────────────────────────────
+
+    [Fact]
+    public async Task FetchUrlAsync_ExpiredCache_RefetchesFromHttp()
+    {
+        var handler = new FakeHandler();
+        handler.Enqueue(Ok("first response"));
+        handler.Enqueue(Ok("second response"));
+
+        // Use a very short TTL so the cache expires immediately
+        var fetcher = new WebFetcher(
+            new HttpClient(handler),
+            NullLogger<WebFetcher>.Instance,
+            rateLimitDelay: TimeSpan.Zero,
+            cacheTtl: TimeSpan.FromMilliseconds(1));
+
+        var first = await fetcher.FetchUrlAsync("http://example.com/expiry");
+
+        // Wait for TTL to expire
+        await Task.Delay(TimeSpan.FromMilliseconds(50));
+
+        var second = await fetcher.FetchUrlAsync("http://example.com/expiry");
+
+        Assert.Equal("first response",  first.Body);
+        Assert.Equal("second response", second.Body);
+    }
+
     [Fact]
     public async Task FetchRssAsync_CacheKeyUsesOriginalUrl_AfterRedirect()
     {

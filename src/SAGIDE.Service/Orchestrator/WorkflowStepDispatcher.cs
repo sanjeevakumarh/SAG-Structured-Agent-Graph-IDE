@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using SAGIDE.Core.DTOs;
 using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
+using SAGIDE.Observability;
 using SAGIDE.Service.Events;
 using SAGIDE.Service.Infrastructure;
 using SAGIDE.Service.Prompts;
@@ -61,6 +62,15 @@ internal sealed class WorkflowStepDispatcher
         WorkflowDefinition def,
         string stepId)
     {
+        using var stepActivity = SagideActivitySource.Start(
+            SagideActivitySource.Workflow,
+            $"workflow.step.complete:{stepId}",
+            ActivityKind.Internal,
+            TraceContext.TraceId);
+        stepActivity?.SetTag("workflow.instance_id", inst.InstanceId);
+        stepActivity?.SetTag("workflow.step_id",     stepId);
+        stepActivity?.SetTag("task.status",          status.Status.ToString());
+
         var stepExec = inst.StepExecutions[stepId];
 
         switch (status.Status)
@@ -372,6 +382,16 @@ internal sealed class WorkflowStepDispatcher
     {
         if (inst.StepExecutions[stepDef.Id].Status == WorkflowStepStatus.Running)
             return;
+
+        using var stepActivity = SagideActivitySource.Start(
+            SagideActivitySource.Workflow,
+            $"workflow.step.submit:{stepDef.Id}",
+            ActivityKind.Internal,
+            TraceContext.TraceId);
+        stepActivity?.SetTag("workflow.instance_id", inst.InstanceId);
+        stepActivity?.SetTag("workflow.definition_id", inst.DefinitionId);
+        stepActivity?.SetTag("workflow.step_id",       stepDef.Id);
+        stepActivity?.SetTag("workflow.step_type",     stepDef.Type ?? "agent");
 
         var policyResult = _policyEngine.Check(stepDef, inst);
         if (!policyResult.IsAllowed)

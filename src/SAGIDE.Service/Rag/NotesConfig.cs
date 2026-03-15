@@ -15,7 +15,7 @@ public class NotesConfig
     public List<string> TaskMarkers { get; set; } = ["TODO", "DOING", "LATER", "NOW", "NEXT", "IN-PROGRESS"];
 
     /// <summary>
-    /// Model spec for LLM-powered search summaries (e.g. "ollama/qwen2.5:14b-instruct-q5_K_M@workstation").
+    /// Model spec for LLM-powered search summaries (e.g. "ollama/gemma3:27b@workstation").
     /// When empty, search returns results without a summary.
     /// </summary>
     public string SummaryModel { get; set; } = string.Empty;

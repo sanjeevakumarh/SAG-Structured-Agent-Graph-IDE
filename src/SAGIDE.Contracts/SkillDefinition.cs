@@ -1,9 +1,9 @@
-namespace SAGIDE.Core.Models;
+namespace SAGIDE.Contracts;
 
 /// <summary>
-/// Deserialized representation of a skill YAML file from the skills/ directory.
+/// Deserialized representation of a skill YAML file.
 /// Skills are named, versioned, reusable bundles of data-collection step primitives
-/// with typed input/output contracts. They are the "methods" in the OOP workflow model.
+/// with typed input/output contracts.
 /// </summary>
 public class SkillDefinition
 {
@@ -44,8 +44,14 @@ public class SkillDefinition
     /// </summary>
     public List<PromptDataCollectionStep> Implementation { get; set; } = [];
 
-    /// <summary>Absolute path of the YAML file this was loaded from. Set by SkillRegistry.</summary>
+    /// <summary>Absolute path of the YAML file this was loaded from. Null for API-registered skills.</summary>
     public string? FilePath { get; set; }
+
+    /// <summary>
+    /// Registration source: "file" for filesystem-loaded, "api" for API-registered.
+    /// Used to prevent file-reload from overwriting API-registered definitions.
+    /// </summary>
+    public string Source { get; set; } = "file";
 }
 
 /// <summary>

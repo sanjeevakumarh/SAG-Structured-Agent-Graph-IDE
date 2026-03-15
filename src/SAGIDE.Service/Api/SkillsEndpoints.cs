@@ -1,7 +1,6 @@
 using Microsoft.Extensions.Configuration;
-using SAGIDE.Core.Models;
+using SAGIDE.Contracts;
 using SAGIDE.Service.Orchestrator;
-using SAGIDE.Service.Prompts;
 
 namespace SAGIDE.Service.Api;
 
@@ -16,7 +15,7 @@ internal static class SkillsEndpoints
     internal static IEndpointRouteBuilder MapSkillsEndpoints(this IEndpointRouteBuilder app)
     {
         // GET /api/skills — list all skills with summary metadata
-        app.MapGet("/api/skills", (SkillRegistry registry) =>
+        app.MapGet("/api/skills", (ISkillRegistry registry) =>
         {
             var skills = registry.GetAll().Select(s => new
             {
@@ -32,7 +31,7 @@ internal static class SkillsEndpoints
         });
 
         // GET /api/skills/{domain}/{name} — full skill definition
-        app.MapGet("/api/skills/{domain}/{name}", (string domain, string name, SkillRegistry registry) =>
+        app.MapGet("/api/skills/{domain}/{name}", (string domain, string name, ISkillRegistry registry) =>
         {
             var skill = registry.GetByKey(domain, name);
             return skill is null ? Results.NotFound() : Results.Ok(skill);
@@ -41,8 +40,8 @@ internal static class SkillsEndpoints
         // GET /api/skills/graph — skill composition DAG for a given prompt
         // Returns nodes (skill instances) and edges (data flow) suitable for visual rendering.
         // Query param: ?prompt=domain/name
-        app.MapGet("/api/skills/graph", (string? prompt, SkillRegistry skillRegistry,
-            SAGIDE.Service.Prompts.PromptRegistry promptRegistry) =>
+        app.MapGet("/api/skills/graph", (string? prompt, ISkillRegistry skillRegistry,
+            IPromptRegistry promptRegistry) =>
         {
             if (string.IsNullOrWhiteSpace(prompt))
                 return Results.BadRequest("prompt query parameter required (e.g. ?prompt=research/idea-to-product-seq)");
@@ -139,7 +138,7 @@ internal static class SkillsEndpoints
         app.MapPost("/api/skills/{domain}/{name}/run",
             async (string domain, string name,
                    SkillRunRequest? request,
-                   SkillRegistry skillRegistry,
+                   ISkillRegistry skillRegistry,
                    SubtaskCoordinator coordinator,
                    IConfiguration config,
                    CancellationToken ct) =>
@@ -151,7 +150,7 @@ internal static class SkillsEndpoints
                 // Build a minimal synthetic PromptDefinition that runs just this skill
                 var defaultModel = config[$"SAGIDE:Routing:Capabilities:deep_analyst"]
                                 ?? config[$"SAGIDE:Routing:Capabilities:fast_general"]
-                                ?? "ollama/qwen2.5:14b-instruct-q5_K_M@workstation";
+                                ?? "ollama/gemma3:27b@workstation";
                 var prompt = new PromptDefinition
                 {
                     Name       = skill.Name,
@@ -193,6 +192,47 @@ internal static class SkillsEndpoints
                     instance_id  = result.InstanceId,
                 });
             });
+
+        // ── Registration endpoints ────────────────────────────────────────────
+
+        // POST /api/skills/register — register a single skill definition
+        app.MapPost("/api/skills/register", (SkillDefinition skill, ISkillRegistrationService registration) =>
+        {
+            try
+            {
+                registration.Register(skill);
+                return Results.Created($"/api/skills/{skill.Domain}/{skill.Name}", new
+                {
+                    skill  = $"{skill.Domain}/{skill.Name}",
+                    version = skill.Version,
+                    status = "registered",
+                });
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+
+        // POST /api/skills/register/bulk — register multiple skill definitions at once
+        app.MapPost("/api/skills/register/bulk", (List<SkillDefinition> skills, ISkillRegistrationService registration) =>
+        {
+            registration.RegisterBulk(skills);
+            return Results.Ok(new
+            {
+                count  = skills.Count,
+                status = "registered",
+            });
+        });
+
+        // DELETE /api/skills/{domain}/{name} — unregister an API-registered skill
+        app.MapDelete("/api/skills/{domain}/{name}", (string domain, string name, ISkillRegistrationService registration) =>
+        {
+            var removed = registration.Unregister(domain, name);
+            return removed
+                ? Results.Ok(new { skill = $"{domain}/{name}", status = "unregistered" })
+                : Results.NotFound(new { error = $"No API-registered skill '{domain}/{name}' found" });
+        });
 
         return app;
     }

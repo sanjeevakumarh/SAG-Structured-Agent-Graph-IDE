@@ -1,3 +1,4 @@
+using SAGIDE.Contracts;
 using SAGIDE.Core.DTOs;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Orchestrator;
@@ -13,7 +14,7 @@ internal static class PromptEndpoints
     {
         _logger = app.ServiceProvider.GetService<ILoggerFactory>()?.CreateLogger("SAGIDE.PromptEndpoints");
         // GET /api/prompts — all registered prompts (summary fields)
-        app.MapGet("/api/prompts", (PromptRegistry registry) =>
+        app.MapGet("/api/prompts", (IPromptRegistry registry) =>
         {
             var prompts = registry.GetAll().Select(p => new
             {
@@ -29,7 +30,7 @@ internal static class PromptEndpoints
         });
 
         // GET /api/prompts/{domain} — prompts for a specific domain (e.g. "finance")
-        app.MapGet("/api/prompts/{domain}", (string domain, PromptRegistry registry) =>
+        app.MapGet("/api/prompts/{domain}", (string domain, IPromptRegistry registry) =>
         {
             var prompts = registry.GetByDomain(domain).Select(p => new
             {
@@ -45,7 +46,7 @@ internal static class PromptEndpoints
         });
 
         // GET /api/prompts/{domain}/{name} — full prompt definition
-        app.MapGet("/api/prompts/{domain}/{name}", (string domain, string name, PromptRegistry registry) =>
+        app.MapGet("/api/prompts/{domain}/{name}", (string domain, string name, IPromptRegistry registry) =>
         {
             var prompt = registry.GetByKey(domain, name);
             return prompt is not null ? Results.Ok(prompt) : Results.NotFound();
@@ -56,7 +57,7 @@ internal static class PromptEndpoints
         app.MapPost("/api/prompts/{domain}/{name}/run", async (
             string domain, string name,
             Dictionary<string, string>? variables,
-            PromptRegistry registry,
+            IPromptRegistry registry,
             AgentOrchestrator orchestrator,
             SubtaskCoordinator coordinator,
             CancellationToken ct) =>
@@ -139,6 +140,47 @@ internal static class PromptEndpoints
                 sourceTag = task.SourceTag,
                 prompt    = $"{domain}/{name}",
             });
+        });
+
+        // ── Registration endpoints ────────────────────────────────────────────
+
+        // POST /api/prompts/register — register a single prompt definition
+        app.MapPost("/api/prompts/register", (PromptDefinition prompt, IPromptRegistrationService registration) =>
+        {
+            try
+            {
+                registration.Register(prompt);
+                return Results.Created($"/api/prompts/{prompt.Domain}/{prompt.Name}", new
+                {
+                    prompt  = $"{prompt.Domain}/{prompt.Name}",
+                    version = prompt.Version,
+                    status  = "registered",
+                });
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+
+        // POST /api/prompts/register/bulk — register multiple prompt definitions at once
+        app.MapPost("/api/prompts/register/bulk", (List<PromptDefinition> prompts, IPromptRegistrationService registration) =>
+        {
+            registration.RegisterBulk(prompts);
+            return Results.Ok(new
+            {
+                count  = prompts.Count,
+                status = "registered",
+            });
+        });
+
+        // DELETE /api/prompts/{domain}/{name} — unregister an API-registered prompt
+        app.MapDelete("/api/prompts/{domain}/{name}", (string domain, string name, IPromptRegistrationService registration) =>
+        {
+            var removed = registration.Unregister(domain, name);
+            return removed
+                ? Results.Ok(new { prompt = $"{domain}/{name}", status = "unregistered" })
+                : Results.NotFound(new { error = $"No API-registered prompt '{domain}/{name}' found" });
         });
 
         return app;

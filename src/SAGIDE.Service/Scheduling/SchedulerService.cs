@@ -1,11 +1,13 @@
+using System.Diagnostics;
 using Cronos;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.Interfaces;
+using SAGIDE.Contracts;
 using SAGIDE.Core.Models;
+using SAGIDE.Observability;
 using SAGIDE.Service.Orchestrator;
-using SAGIDE.Service.Prompts;
 
 namespace SAGIDE.Service.Scheduling;
 
@@ -17,7 +19,7 @@ namespace SAGIDE.Service.Scheduling;
 /// </summary>
 public sealed class SchedulerService : BackgroundService
 {
-    private readonly PromptRegistry _registry;
+    private readonly IPromptRegistry _registry;
     private readonly ITaskSubmissionService _taskSubmission;
     private readonly SubtaskCoordinator _coordinator;
     private readonly ISchedulerRepository _schedulerRepo;
@@ -28,7 +30,7 @@ public sealed class SchedulerService : BackgroundService
     private readonly Dictionary<string, DateTimeOffset> _lastFired = [];
 
     public SchedulerService(
-        PromptRegistry registry,
+        IPromptRegistry registry,
         ITaskSubmissionService taskSubmission,
         SubtaskCoordinator coordinator,
         ISchedulerRepository schedulerRepo,
@@ -133,6 +135,15 @@ public sealed class SchedulerService : BackgroundService
 
     private async Task FirePromptAsync(PromptDefinition prompt, CancellationToken ct)
     {
+        // Each scheduled firing is an independent root span + trace context.
+        using var activity = SagideActivitySource.Start(
+            SagideActivitySource.Scheduler,
+            $"scheduler.fire:{prompt.Domain}/{prompt.Name}",
+            ActivityKind.Internal);
+        using var traceScope = TraceContext.Start(
+            $"scheduler:{prompt.Domain}/{prompt.Name}",
+            sourceTag: prompt.SourceTag ?? "scheduler");
+
         try
         {
             // Check inline subtasks OR objects/workflow declarations (WorkflowExpander runs inside RunAsync).

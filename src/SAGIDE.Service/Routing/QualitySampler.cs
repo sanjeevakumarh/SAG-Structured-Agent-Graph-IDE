@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.Interfaces;
+using SAGIDE.Contracts;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Orchestrator;
 using SAGIDE.Service.Prompts;
@@ -32,7 +33,7 @@ public sealed class QualitySampler
     private readonly ProviderFactory _providerFactory;
     private readonly EndpointAliasResolver _aliasResolver;
     private readonly TaskQueue _taskQueue;
-    private readonly PromptRegistry _promptRegistry;
+    private readonly IPromptRegistry _promptRegistry;
     private readonly ILogger<QualitySampler> _logger;
 
     // Token budget tracking — resets every hour
@@ -49,7 +50,7 @@ public sealed class QualitySampler
         ProviderFactory providerFactory,
         EndpointAliasResolver aliasResolver,
         TaskQueue taskQueue,
-        PromptRegistry promptRegistry,
+        IPromptRegistry promptRegistry,
         ILogger<QualitySampler> logger)
     {
         _config          = config;

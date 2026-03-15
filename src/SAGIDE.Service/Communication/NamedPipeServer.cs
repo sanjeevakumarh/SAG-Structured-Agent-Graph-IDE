@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
@@ -6,6 +7,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
+using SAGIDE.Observability;
 using SAGIDE.Service.Communication.Messages;
 
 namespace SAGIDE.Service.Communication;
@@ -310,6 +312,14 @@ public class NamedPipeServer
                     ?? throw new InvalidOperationException("Failed to deserialize PipeMessage");
                 _logger.LogDebug("Received message type: {Type} from {ClientId}", message.Type, clientId);
 
+                // Stamp a trace context for this pipe message — each message is its own
+                // root span so traces show the full call chain from IPC through to LLM.
+                using var pipeActivity = SagideActivitySource.Start(
+                    SagideActivitySource.Api,
+                    $"pipe:{message.Type}",
+                    ActivityKind.Server);
+                using var traceScope = TraceContext.Start($"pipe:{message.Type}", sourceTag: "vscode");
+
                 var response = await _messageHandler.HandleAsync(message, ct);
                 await SendWithLockAsync(entry, response, ct);
 
@@ -328,11 +338,17 @@ public class NamedPipeServer
                                 _taskOwners[taskId] = clientId;
                         }
                     }
-                    catch { /* silently ignore parse errors */ }
+                    catch (Exception parseEx)
+                    {
+                        _logger.LogDebug(parseEx, "Failed to parse taskId from SubmitTask response for client {ClientId}", clientId);
+                    }
                 }
             }
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Client {ClientId} read loop cancelled (shutdown)", clientId);
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error handling client {ClientId}", clientId);

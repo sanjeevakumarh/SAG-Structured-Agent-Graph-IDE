@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.Interfaces;
+using SAGIDE.Contracts;
 using SAGIDE.Core.Models;
 using SAGIDE.Service.Prompts;
 using SAGIDE.Service.Providers;
@@ -34,7 +35,7 @@ public sealed class SubtaskCoordinator
     private readonly IConfiguration _config;
     private readonly ILogger<SubtaskCoordinator> _logger;
     private readonly OllamaHostHealthMonitor? _healthMonitor;
-    private readonly SkillRegistry? _skillRegistry;
+    private readonly ISkillRegistry? _skillRegistry;
     private readonly IReadOnlyList<string> _allOllamaUrls;
 
     // Maps expanded step name → its source skill definition, used for Phase 3 output validation.
@@ -66,7 +67,7 @@ public sealed class SubtaskCoordinator
         IConfiguration config,
         ILogger<SubtaskCoordinator> logger,
         OllamaHostHealthMonitor? healthMonitor = null,
-        SkillRegistry? skillRegistry = null,
+        ISkillRegistry? skillRegistry = null,
         RagPipeline? ragPipeline = null)
     {
         _taskSubmission = taskSubmission;

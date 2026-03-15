@@ -57,7 +57,7 @@ internal sealed class WorkflowInstanceStore
         RevDepsCache[inst.InstanceId]    = BuildReverseDeps(def);
     }
 
-    internal bool TryGet(string instanceId, out WorkflowInstance inst, out WorkflowDefinition def)
+    internal bool TryGet(string instanceId, [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out WorkflowInstance inst, [System.Diagnostics.CodeAnalysis.MaybeNullWhen(false)] out WorkflowDefinition def)
     {
         if (Active.TryGetValue(instanceId, out var entry))
         {
@@ -65,8 +65,8 @@ internal sealed class WorkflowInstanceStore
             def  = entry.Def;
             return true;
         }
-        inst = null!;
-        def  = null!;
+        inst = null;
+        def  = null;
         return false;
     }
 

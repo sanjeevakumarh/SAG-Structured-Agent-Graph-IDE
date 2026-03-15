@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using SAGIDE.Core.Models;
+using SAGIDE.Observability;
 
 namespace SAGIDE.Service.Rag;
 
@@ -42,6 +44,15 @@ public sealed class RagPipeline
         PromptDefinition prompt,
         CancellationToken ct = default)
     {
+        using var activity = SagideActivitySource.Start(
+            SagideActivitySource.Memory,
+            "rag.index",
+            ActivityKind.Internal,
+            TraceContext.TraceId);
+        activity?.SetTag("rag.domain",      prompt.Domain);
+        activity?.SetTag("rag.prompt_name", prompt.Name);
+        activity?.SetTag("rag.sources",     prompt.DataSources.Count);
+
         _logger.LogInformation("RAG indexing: {Domain}/{Name} ({Count} sources)",
             prompt.Domain, prompt.Name, prompt.DataSources.Count);
 
@@ -70,6 +81,14 @@ public sealed class RagPipeline
         string? sourceTag = null,
         CancellationToken ct = default)
     {
+        using var activity = SagideActivitySource.Start(
+            SagideActivitySource.Memory,
+            "rag.retrieve",
+            ActivityKind.Internal,
+            TraceContext.TraceId);
+        activity?.SetTag("rag.top_k",     topK);
+        activity?.SetTag("rag.source_tag", sourceTag ?? "");
+
         var queryVector = await _embedder.EmbedAsync(query, ct);
         if (queryVector.Length == 0) return string.Empty;
 

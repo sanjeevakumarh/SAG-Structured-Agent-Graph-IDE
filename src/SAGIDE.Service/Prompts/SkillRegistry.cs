@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using SAGIDE.Core.Models;
+using SAGIDE.Contracts;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -10,17 +10,21 @@ namespace SAGIDE.Service.Prompts;
 /// <summary>
 /// Loads all skill YAML files from the configured SkillsPath directory, indexes them by
 /// (domain, name), and hot-reloads when files change on disk.
-/// Mirrors the PromptRegistry pattern.
+/// Also supports API-based registration for external applications.
 /// </summary>
-public sealed class SkillRegistry : IDisposable
+public sealed class SkillRegistry : ISkillRegistry, ISkillRegistrationService, IDisposable
 {
     private readonly string _skillsRoot;
     private readonly ILogger<SkillRegistry> _logger;
     private readonly IDeserializer _yaml;
     private readonly FileSystemWatcher _watcher;
 
-    // Keyed by "{domain}/{name}" (lower-case)
-    private volatile Dictionary<string, SkillDefinition> _index = [];
+    // File-loaded skills — rebuilt on every file change
+    private volatile Dictionary<string, SkillDefinition> _fileIndex = [];
+
+    // API-registered skills — survive file reloads
+    private readonly Dictionary<string, SkillDefinition> _apiIndex = new(StringComparer.Ordinal);
+    private readonly object _apiLock = new();
 
     /// <summary>
     /// Shared text blocks loaded from <c>skills/shared/prompt-blocks.yaml</c>.
@@ -38,8 +42,7 @@ public sealed class SkillRegistry : IDisposable
             ? configuredPath
             : Path.GetFullPath(Path.Combine(env.ContentRootPath, configuredPath));
 
-        // If the resolved path doesn't exist (common when the release exe runs without
-        // an explicit --SAGIDE:SkillsPath override), walk up from the exe location to
+        // If the resolved path doesn't exist, walk up from the exe location to
         // find the repo-root skills/ directory automatically.
         if (!Directory.Exists(_skillsRoot))
         {
@@ -79,20 +82,20 @@ public sealed class SkillRegistry : IDisposable
         }
     }
 
-    // ── Public API ─────────────────────────────────────────────────────────────
+    // ── ISkillRegistry (read) ─────────────────────────────────────────────────
 
-    public IReadOnlyList<SkillDefinition> GetAll() => [.. _index.Values];
+    public IReadOnlyList<SkillDefinition> GetAll() => [.. MergedIndex().Values];
 
     public IReadOnlyList<SkillDefinition> GetByDomain(string domain)
     {
         var prefix = domain.ToLowerInvariant() + "/";
-        return [.. _index
+        return [.. MergedIndex()
             .Where(kv => kv.Key.StartsWith(prefix, StringComparison.Ordinal))
             .Select(kv => kv.Value)];
     }
 
     public SkillDefinition? GetByKey(string domain, string name) =>
-        _index.TryGetValue(MakeKey(domain, name), out var def) ? def : null;
+        MergedIndex().TryGetValue(MakeKey(domain, name), out var def) ? def : null;
 
     /// <summary>
     /// Resolves a skill reference that is either "domain/name" or just "name".
@@ -101,33 +104,97 @@ public sealed class SkillRegistry : IDisposable
     /// </summary>
     public SkillDefinition? Resolve(string skillRef)
     {
+        var merged = MergedIndex();
+
         // Fully-qualified: "research/web-research-track"
         if (skillRef.Contains('/'))
         {
             var slash = skillRef.IndexOf('/');
             var domain = skillRef[..slash].Trim();
             var name   = skillRef[(slash + 1)..].Trim();
-            var result = GetByKey(domain, name);
-            if (result is null)
-                _logger.LogWarning("Skill '{Ref}' not found in registry", skillRef);
-            return result;
+            var key    = MakeKey(domain, name);
+            if (merged.TryGetValue(key, out var result))
+                return result;
+            _logger.LogWarning("Skill '{Ref}' not found in registry", skillRef);
+            return null;
         }
 
         // Short name: search all domains
         var lower = skillRef.ToLowerInvariant();
-        var match = _index.Values.FirstOrDefault(s => s.Name.ToLowerInvariant() == lower);
+        var match = merged.Values.FirstOrDefault(s => s.Name.ToLowerInvariant() == lower);
         if (match is null)
             _logger.LogWarning("Skill '{Ref}' not found in registry (searched all domains)", skillRef);
         return match;
     }
 
-    // ── Internal loading ────────────────────────────────────────────────────────
+    // ── ISkillRegistrationService (write) ─────────────────────────────────────
+
+    public void Register(SkillDefinition skill)
+    {
+        if (string.IsNullOrEmpty(skill.Name) || string.IsNullOrEmpty(skill.Domain))
+            throw new ArgumentException("Skill must have both name and domain set.");
+
+        skill.Source = "api";
+        var key = MakeKey(skill.Domain, skill.Name);
+        lock (_apiLock)
+        {
+            _apiIndex[key] = skill;
+        }
+        _logger.LogInformation("API-registered skill: {Domain}/{Name} v{Version}", skill.Domain, skill.Name, skill.Version);
+    }
+
+    public void RegisterBulk(IEnumerable<SkillDefinition> skills)
+    {
+        lock (_apiLock)
+        {
+            foreach (var skill in skills)
+            {
+                if (string.IsNullOrEmpty(skill.Name) || string.IsNullOrEmpty(skill.Domain))
+                    continue;
+                skill.Source = "api";
+                _apiIndex[MakeKey(skill.Domain, skill.Name)] = skill;
+            }
+        }
+        _logger.LogInformation("Bulk-registered {Count} skills via API", _apiIndex.Count);
+    }
+
+    public bool Unregister(string domain, string name)
+    {
+        var key = MakeKey(domain, name);
+        lock (_apiLock)
+        {
+            return _apiIndex.Remove(key);
+        }
+    }
+
+    // ── Merged index ──────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Returns file-loaded + API-registered skills merged. API takes precedence on collision.
+    /// </summary>
+    private Dictionary<string, SkillDefinition> MergedIndex()
+    {
+        Dictionary<string, SkillDefinition> apiSnapshot;
+        lock (_apiLock)
+        {
+            if (_apiIndex.Count == 0)
+                return _fileIndex;
+            apiSnapshot = new Dictionary<string, SkillDefinition>(_apiIndex, StringComparer.Ordinal);
+        }
+
+        var merged = new Dictionary<string, SkillDefinition>(_fileIndex, StringComparer.Ordinal);
+        foreach (var kv in apiSnapshot)
+            merged[kv.Key] = kv.Value; // API overrides file
+        return merged;
+    }
+
+    // ── Internal file loading ────────────────────────────────────────────────
 
     private void LoadAll()
     {
         if (!Directory.Exists(_skillsRoot))
         {
-            _index = [];
+            _fileIndex = [];
             return;
         }
 
@@ -140,7 +207,7 @@ public sealed class SkillRegistry : IDisposable
         }
         catch (DirectoryNotFoundException)
         {
-            _index = [];
+            _fileIndex = [];
             return;
         }
 
@@ -160,6 +227,7 @@ public sealed class SkillRegistry : IDisposable
                     continue;
 
                 def.FilePath = file;
+                def.Source = "file";
                 next[MakeKey(def.Domain, def.Name)] = def;
             }
             catch (Exception ex)
@@ -168,7 +236,7 @@ public sealed class SkillRegistry : IDisposable
             }
         }
 
-        _index = next;
+        _fileIndex = next;
 
         // ── Load prompt blocks from the well-known file ──────────────────────
         LoadPromptBlocks();
@@ -216,9 +284,6 @@ public sealed class SkillRegistry : IDisposable
 
     /// <summary>
     /// Walks up from <paramref name="startDir"/> looking for a <c>skills/</c> subdirectory.
-    /// Returns the first match, or null if none is found before reaching the filesystem root.
-    /// Used as a fallback when the configured SkillsPath doesn't exist (e.g. release exe run
-    /// without the --SAGIDE:SkillsPath command-line override).
     /// </summary>
     private static string? WalkUpForSkillsDir(string startDir)
     {

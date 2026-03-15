@@ -1,6 +1,5 @@
 using Microsoft.Extensions.Logging;
-using SAGIDE.Core.Models;
-using SAGIDE.Service.Prompts;
+using SAGIDE.Contracts;
 
 namespace SAGIDE.Service.Orchestrator;
 
@@ -27,7 +26,7 @@ public static class WorkflowExpander
     /// Expands objects/workflow into flat data_collection.steps + subtasks.
     /// Mutates <paramref name="prompt"/> in place. No-op if no objects or workflow defined.
     /// </summary>
-    public static void Expand(PromptDefinition prompt, SkillRegistry skills, ILogger logger)
+    public static void Expand(PromptDefinition prompt, ISkillRegistry skills, ILogger logger)
     {
         if (prompt.Objects.Count == 0 && prompt.Workflow.Count == 0) return;
 

@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=../docs/skill-schema.json
 name: technical-analyst
-version: 2
+version: 3
 domain: finance
 protocol_implements: [Analyzable]
 
@@ -70,6 +70,10 @@ implementation:
         - OVERBOUGHT only if RSI > 70
         - OVERSOLD only if RSI < 30
         - NEUTRAL if RSI is between 30 and 70 (e.g. RSI 62 = NEUTRAL, not overbought)
+      Stochastic (14,3,3): If available, state value. Classify STRICTLY as:
+        - OVERBOUGHT only if Stochastic > 80
+        - OVERSOLD only if Stochastic < 20
+        - NEUTRAL if between 20 and 80
       MACD line vs signal line — bullish crossover, bearish crossover, or flat?
 
       ### Moving Averages
@@ -87,8 +91,13 @@ implementation:
       For every indicator and price level, cite the specific number from source material.
       If an indicator is absent from sources, write "[DATA UNAVAILABLE]" (this exact marker) — do NOT estimate or use prose like "not available".
 
-      **Signal: BULLISH / NEUTRAL / BEARISH** — one sentence rationale.
+      ### Signal Synthesis
+      Count how many indicators are bullish, neutral, and bearish.
+      If indicators conflict (e.g. MACD bullish but Stochastic overbought), explicitly state the conflict
+      and explain which signal dominates and why.
+
+      **Signal: BULLISH / NEUTRAL / BEARISH** — one sentence rationale citing the indicator tally.
 
       ### GATE_SIGNAL
       SIGNAL: [BULLISH | NEUTRAL | BEARISH | INSUFFICIENT_DATA]
-      RATIONALE: [one sentence citing the dominant indicator]
+      RATIONALE: [one sentence citing the indicator tally and dominant signal]

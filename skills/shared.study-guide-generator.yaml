@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=../docs/skill-schema.json
 name: study-guide-generator
-version: 2
+version: 3
 domain: shared
 protocol_implements: [Analyzable]
 
@@ -102,6 +102,7 @@ implementation:
       - CITATION INTEGRITY: Only cite resources you are CERTAIN exist. Prefer: official documentation, top-selling textbooks, and major MOOCs (Coursera, edX, MIT OCW). For books, only cite if you are confident of BOTH the exact title AND the correct author(s). If unsure about the author, cite the title only and add "[verify availability]". For papers, only cite seminal works you are confident are real (e.g., Dijkstra 1968, Lamport 1978, etc.). For courses, only cite specific ones you know exist on the named platform. It is ALWAYS better to cite fewer high-confidence sources than many dubious ones.
       - Every vocabulary term must be unique — no duplicates.
       - Use the exact GATE_SIGNAL format shown (with ### heading, SIGNAL on its own line, RATIONALE on its own line). Do not use brackets around the signal value.
+      - COMPLETENESS: You MUST produce ALL sub-sections listed for this section. Do not omit any sub-section. If a sub-section is difficult for this subject, still produce it with the best available resources and mark uncertain recommendations with "[verify availability]".
 
       {{ if section_name == "Orientation (101)" }}
       Produce: key learning goals, prerequisite checklist, and a short bridge plan to close gaps.

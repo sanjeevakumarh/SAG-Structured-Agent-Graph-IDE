@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=../docs/skill-schema.json
 name: decision-evaluator
-version: 2
+version: 3
 domain: strategy
 protocol_implements: [Analyzable]
 
@@ -68,10 +68,12 @@ implementation:
       State any assumptions made due to missing context.
 
       ## Options Matrix
-      | Option | Cost | Speed | Risk | Reversibility | Strategic Fit |
-      |---|---|---|---|---|---|
-      Rate each dimension: High/Med/Low or a relative score.
-      Add a "Weight × Score" column if evaluation_criteria provided weights.
+      | Option | Cost | Speed | Risk | Reversibility | Strategic Fit | Weighted Score |
+      |---|---|---|---|---|---|---|
+      Score each dimension on a 1-5 scale (1=worst, 5=best). Show the numeric score.
+      Apply the evaluation criteria weights (or default: cost 25%, speed 20%, risk 25%, reversibility 15%, strategic fit 15%).
+      Compute Weighted Score = sum of (weight × score) for each option. Show the math.
+      If all options score within 0.5 of each other, explain WHY they are so close and what differentiates them.
 
       ## Trade-off Analysis
       For each option: the single strongest argument FOR and AGAINST.
@@ -82,6 +84,12 @@ implementation:
       - Reversibility: Fully reversible / Partially reversible / Irreversible
       - Worst-case outcome if this option fails
       - Probability of worst case: High / Med / Low (state basis)
+
+      ## Cost-Benefit Analysis
+      For each option, compute a cost-effectiveness ratio: Weighted Score / Cost.
+      If cost data is provided as numbers, use them directly.
+      If qualitative, convert to relative scale (e.g. Low=$, Med=$$, High=$$$).
+      Highlight the option with the best value-for-money.
 
       ## Expected Value
       If quantitative data was provided, compute weighted expected value.
@@ -97,8 +105,16 @@ implementation:
       List every assumption made where input data was absent.
       If any assumption is wrong, state which option would change and why.
 
+      MANDATORY COMPLETENESS CHECK:
+      You MUST output ALL sections listed above: Decision Context, Options Matrix, Trade-off Analysis,
+      Reversibility & Downside Risk, Cost-Benefit Analysis, Expected Value, Recommendation, Assumptions.
+      If you omit ANY section, the evaluation is INVALID. The Recommendation section is REQUIRED — you
+      MUST name a specific recommended option, not just rank them.
+
       Rules:
       - Base analysis only on the provided options and context
       - Never invent options not described in the input
       - Prefer reversible options under uncertainty — state when this applies
+      - Cost estimates MUST include a breakdown (labor, infrastructure, licensing, contingency) when input data allows
+      - If the decision context mentions exit/acquisition goals, evaluate which option best positions for that outcome
     output_var: "{{parameters.output_var}}"

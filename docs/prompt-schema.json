@@ -166,8 +166,8 @@
         },
         "type": {
           "type": "string",
-          "enum": ["read_file", "web_api", "web_api_batch", "filter", "web_search_batch", "llm_queries", "llm_per_section", "skill", "llm", "vector_search", "json_extract"],
-          "description": "Step type determines which collector runs. 'skill' expands a named skill. 'llm' submits a single free-form LLM call and stores the result. 'vector_search' queries the RAG vector store by source_tag. 'json_extract' parses a JSON variable and promotes its fields into the var context."
+          "enum": ["read_file", "web_api", "web_api_batch", "web_fetch", "filter", "web_search_batch", "llm_queries", "llm_per_section", "skill", "llm", "vector_search", "json_extract"],
+          "description": "Step type determines which collector runs. 'skill' expands a named skill. 'llm' submits a single free-form LLM call and stores the result. 'vector_search' queries the RAG vector store by source_tag. 'json_extract' parses a JSON variable and promotes its fields into the var context. 'web_fetch' fetches a URL and extracts readable text from HTML (use for deterministic URLs where search is unnecessary)."
         },
         "skill": {
           "type": "string",
@@ -186,6 +186,16 @@
         "optional_output": {
           "type": "boolean",
           "description": "When true, an empty output_var does not abort the run. Use for search tracks where zero results is a legitimate outcome. A missing_data_summary var is injected into context so downstream prompts can acknowledge unavailable data."
+        },
+        "fetch_pages": {
+          "type": "integer",
+          "description": "Number of top search result pages to fetch and extract text from. 0 (default) = snippet-only. When > 0, actual page content is fetched, HTML-stripped, and appended. Typically 1-2.",
+          "default": 0
+        },
+        "max_chars_per_page": {
+          "type": "integer",
+          "description": "Maximum characters of extracted text per fetched page. Default 3000.",
+          "default": 3000
         },
         "source": {
           "type": "string",

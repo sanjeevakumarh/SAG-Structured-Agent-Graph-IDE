@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=../docs/skill-schema.json
 name: code-review-auditor
-version: 2
+version: 3
 domain: engineering
 protocol_implements: [Analyzable]
 
@@ -69,13 +69,15 @@ implementation:
       Produce a structured code review using exactly these headings:
 
       ## Correctness Issues
-      For each bug: describe the issue, the line/function it affects, and the fix.
-      If none found, write "None identified."
+      For each bug: describe the issue, quote the offending code, and provide the fix.
+      Include: logic errors, type mismatches, null reference risks, race conditions.
+      Note: async methods calling synchronous APIs (e.g. .Find() instead of .FindAsync()) ARE correctness issues.
+      If none found, write "None identified — no correctness bugs detected."
 
       ## Performance Risks
       Flag O(n²) loops, unnecessary allocations, blocking calls in async paths,
-      missing indexes, or N+1 query patterns. Severity: High / Medium / Low.
-      If none found, write "None identified."
+      missing indexes, or N+1 query patterns. For each: Severity (High/Medium/Low) and impact.
+      If none found, write "None identified — no performance risks detected."
 
       ## Security Concerns
       Check for injection (SQL, command, XSS), hardcoded secrets, insecure
@@ -88,6 +90,7 @@ implementation:
 
       ## Suggested Refactors
       Provide concrete before/after code snippets for the top 1–3 improvements.
+      Order by severity: blocking issues first, then high, medium, low.
       If no refactors needed, write "No refactors suggested."
 
       ## Verdict

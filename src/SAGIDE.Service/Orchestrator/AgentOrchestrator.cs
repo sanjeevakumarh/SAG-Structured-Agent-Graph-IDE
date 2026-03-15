@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.DependencyInjection;
@@ -6,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using SAGIDE.Core.DTOs;
 using SAGIDE.Core.Interfaces;
 using SAGIDE.Core.Models;
+using SAGIDE.Observability;
 using SAGIDE.Service.Agents;
 using SAGIDE.Service.Events;
 using SAGIDE.Service.Observability;
@@ -235,6 +237,18 @@ public class AgentOrchestrator : ITaskSubmissionService
 
         using var _scope = _logger.BeginScope(new { TaskId = task.Id, Provider = task.ModelProvider.ToString(), SourceTag = task.SourceTag });
 
+        // Root span for this task execution — child spans (LLM call, RAG, tool calls) nest inside.
+        using var taskActivity = SagideActivitySource.Start(
+            SagideActivitySource.Orchestrator,
+            "task.execute",
+            ActivityKind.Internal,
+            TraceContext.TraceId);
+        taskActivity?.SetTag("task.id",       task.Id);
+        taskActivity?.SetTag("task.type",     task.AgentType.ToString());
+        taskActivity?.SetTag("task.provider", task.ModelProvider.ToString());
+        taskActivity?.SetTag("task.model",    task.ModelId);
+        taskActivity?.SetTag("sagide.source_tag", task.SourceTag ?? "");
+
         try
         {
             task.Status = AgentTaskStatus.Running;
@@ -359,6 +373,11 @@ public class AgentOrchestrator : ITaskSubmissionService
                 lastResponse = await StreamToStringAsync(provider, prompt, modelConfig, task, taskCt);
                 sw.Stop();
                 _metrics?.RecordLlmCall(sw.ElapsedMilliseconds, provider.LastInputTokens, provider.LastOutputTokens);
+
+                // Record token counts and latency on the task span for cross-cutting analysis.
+                taskActivity?.SetTag("llm.latency_ms",     sw.ElapsedMilliseconds);
+                taskActivity?.SetTag("llm.tokens_input",   provider.LastInputTokens);
+                taskActivity?.SetTag("llm.tokens_output",  provider.LastOutputTokens);
 
                 // Persist per-call performance sample (fire-and-forget — never blocks task execution)
                 if (_perfRepo is not null)
@@ -546,6 +565,16 @@ public class AgentOrchestrator : ITaskSubmissionService
         var lastBroadcastLength = 0;
         var lastBroadcast = DateTime.UtcNow;
         var broadcastInterval = TimeSpan.FromMilliseconds(_broadcastThrottleMs);
+
+        // LLM call span — child of the task.execute span.
+        using var llmActivity = SagideActivitySource.Start(
+            SagideActivitySource.ModelRouter,
+            "llm.complete",
+            ActivityKind.Client,
+            TraceContext.TraceId);
+        llmActivity?.SetTag("llm.provider", provider.Provider.ToString());
+        llmActivity?.SetTag("llm.model",    modelConfig.ModelId);
+        llmActivity?.SetTag("task.id",      task.Id);
 
         // Idle watchdog: cancel if no chunk arrives within the configured window.
         // CancelAfter() resets the countdown on each successive call before it fires.

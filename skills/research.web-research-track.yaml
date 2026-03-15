@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=../docs/skill-schema.json
 name: web-research-track
-version: 1
+version: 2
 domain: research
 protocol_implements: [Collectible]
 
@@ -75,10 +75,15 @@ implementation:
       {{- end }}
       Rules:
       - Each query MUST be SHORT: 5-9 words maximum. Search engines fail on long queries.
-      - Every query MUST reference a DOMAIN-SPECIFIC phrase from "{{parameters.idea}}" — no generic queries
+      - Every query MUST reference a DOMAIN-SPECIFIC phrase from "{{parameters.idea}}" — no generic queries.
       - NEVER lead with generic tech terms: "AI", "ML", "machine learning", "copilot", "chatbot",
         "automation". These return generic AI homepages (OpenAI, Wikipedia). Lead with the DOMAIN keyword instead.
-      - Include {{date}} or the current year in at least 3 queries
+      - DIVERSIFY queries across different angles — no two queries should target the same information:
+        * At least 1 query for market size or industry data (e.g. "[domain] market size 2026")
+        * At least 1 query for specific companies or products (e.g. "[competitor] [product] review")
+        * At least 1 query for risks, regulations, or barriers (e.g. "[domain] compliance requirements")
+      - Prefer specific product names, company names, or industry terms over abstract concepts.
+      - Include {{date}} or the current year in at least 3 queries.
       - Return ONLY a valid JSON array of exactly {{parameters.num_queries}} strings. No explanation, no markdown:
       ["query1", "query2", ...]
     limit: "{{parameters.max_results}}"

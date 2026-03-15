@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=../docs/skill-schema.json
 name: sentiment-analyst
-version: 2
+version: 3
 domain: finance
 protocol_implements: [Analyzable]
 
@@ -78,8 +78,12 @@ implementation:
       ### Short Interest
       Short interest as % of float. Days to cover. Any short squeeze conditions?
 
-      Cite specific analyst names, dates, and numbers from source material.
-      If data is absent from sources, write "[DATA UNAVAILABLE]" (this exact marker) — do NOT estimate or use prose like "not available".
+      SOURCE ATTRIBUTION RULES:
+      - Every claim about analyst ratings, price targets, or insider activity MUST include: (Source, Date) — e.g. "(Goldman Sachs, 2026-03-05)"
+      - News items MUST include the publication name and date
+      - If a claim cannot be attributed to a specific source in the source material, prefix it with "[UNVERIFIED]"
+
+      If data is absent from sources, write "[DATA UNAVAILABLE]" (this exact marker) for that subsection — do NOT estimate, omit the subsection, or use prose like "not available".
 
       **Signal: POSITIVE / NEUTRAL / NEGATIVE** — one sentence rationale.
 

@@ -4,6 +4,7 @@ using System.Threading.RateLimiting;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Configuration;
 using Serilog;
+using SAGIDE.Observability;
 using SAGIDE.Service.Api;
 using SAGIDE.Service.Infrastructure;
 using SAGIDE.Service.Orchestrator;
@@ -54,6 +55,9 @@ try
                 }));
         options.RejectionStatusCode = 429;
     });
+
+    // ── Observability spine ────────────────────────────────────────────────────
+    builder.Services.AddSagideObservability(builder.Configuration);
 
     // ── Config singletons ──────────────────────────────────────────────────────
     builder.Services.AddConfiguredSingleton<LoggingConfig>(builder.Configuration, "SAGIDE:Logging");
@@ -130,6 +134,23 @@ try
 
     // OpenAPI document — /openapi/v1.json (all environments; auth required like other API routes)
     app.MapOpenApi();
+
+    // Stamp TraceContext on every /api/* request so all log lines in the handler
+    // carry the W3C trace ID without any parameter threading.
+    app.Use(async (ctx, next) =>
+    {
+        if (ctx.Request.Path.StartsWithSegments("/api"))
+        {
+            var sourceTag = ctx.Request.Headers["X-Source-Tag"].FirstOrDefault() ?? "rest";
+            using var _ = SAGIDE.Observability.TraceContext.Start(
+                $"{ctx.Request.Method} {ctx.Request.Path}", sourceTag);
+            await next();
+        }
+        else
+        {
+            await next();
+        }
+    });
 
     // REST API endpoints
     app.MapTaskEndpoints();

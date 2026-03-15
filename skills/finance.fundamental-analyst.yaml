@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=../docs/skill-schema.json
 name: fundamental-analyst
-version: 2
+version: 3
 domain: finance
 protocol_implements: [Analyzable]
 
@@ -69,7 +69,9 @@ implementation:
       Gross, operating, and net margin — trend YoY and vs sector peers.
 
       ### Valuation
-      P/E (TTM + forward), P/B, EV/EBITDA. Premium or discount to sector? Explain the gap.
+      P/E (TTM + forward), P/B, EV/EBITDA. Compare to sector median (cite the sector median value from sources).
+      If trading at a premium, explain specifically WHY (growth rate, moat, margin advantage).
+      If sector median is not in sources, write "[DATA UNAVAILABLE] — sector median P/E not found in sources".
 
       ### Balance Sheet
       Debt-to-equity ratio, cash & equivalents, free cash flow yield, interest coverage ratio.
@@ -83,8 +85,10 @@ implementation:
       Cite specific numbers from the source material for every metric.
       If a metric is absent from sources, write "[DATA UNAVAILABLE]" (this exact marker) — do NOT estimate or use prose like "not available".
 
-      **Signal: OVERVALUED / FAIRLY VALUED / UNDERVALUED** — one sentence rationale.
+      **Signal: OVERVALUED / FAIRLY VALUED / UNDERVALUED** — one sentence rationale citing:
+      (1) the specific P/E or valuation multiple, (2) the comparison baseline (sector, historical, or peer),
+      and (3) what growth rate or margin justifies or contradicts the current valuation.
 
       ### GATE_SIGNAL
       SIGNAL: [OVERVALUED | FAIRLY_VALUED | UNDERVALUED | INSUFFICIENT_DATA]
-      RATIONALE: [one sentence citing the key valuation metric]
+      RATIONALE: [one sentence citing the key valuation metric and comparison baseline]

@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=../docs/skill-schema.json
 name: oncall-incident-triage
-version: 2
+version: 3
 domain: security
 protocol_implements: [Analyzable]
 
@@ -72,19 +72,24 @@ implementation:
       List 1–2 alternative hypotheses if evidence is ambiguous.
       If insufficient data: "Insufficient data — see Immediate Steps for diagnostic actions."
 
-      ## Customer Impact
+      ## Customer Impact & SLA Risk
       What is the user-visible symptom? How many users are affected (estimate)?
       Is data at risk? Is the issue getting worse?
+      **SLA Impact**: If error rate and duration are known, quantify: error_rate × duration = SLA impact.
+      State which SLA threshold is at risk (e.g. 99.9% = 43min/month downtime budget).
 
-      ## Immediate Mitigation Steps
-      Numbered list of actions to take RIGHT NOW (next 15 minutes):
-      1. Rollback / feature flag disable / traffic shift (if applicable)
-      2. Diagnostic commands to run (be specific — include example commands)
-      3. Who to notify immediately
+      ## Immediate Mitigation Steps (next 15 minutes)
+      Numbered list of actions to take RIGHT NOW:
+      1. **Kill switch**: Rollback / feature flag disable / traffic shift / kill query (if applicable)
+      2. **Diagnose**: Specific commands to run (include exact commands, not generic advice)
+      3. **Notify**: Who to notify immediately and via which channel
 
       ## Long-Term Fix
       Root cause remediation after the incident is contained.
-      Include: code fix, config change, monitoring improvement, or process change.
+      Split into:
+      - **Quick fix** (deploy within 24h): code fix, config change, or hotfix
+      - **Structural fix** (next sprint): monitoring improvement, architecture change, or process change
+      - **Recurrence prevention**: If the system context suggests this is recurring, explain what pattern is repeating and how to break it
 
       ## Escalation Recommendation
       Should this be escalated? To whom? At what threshold (SLA breach, data risk)?

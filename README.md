@@ -47,6 +47,11 @@ sequenceDiagram
 - Works cross-platform; service can be restarted independently of VS Code. Binary framing (4-byte length prefix) ensures message boundary integrity.
 - ProviderFactory routes tasks to 4 HTTP providers (Claude, Codex, Gemini), Ollama, or TensorRT-LLM with affinity-based server selection.
 
+## Updates (2026-03-14)
+- New `SAGIDE.Contracts` project surfaces Prompt/Skill definitions and registry interfaces; registries now merge file + API registrations, DI exposes interfaces, and prompt/skill endpoints gain register/bulk/delete flows plus typed resolution across orchestrator components and tests.
+- Observability spine added via `SAGIDE.Observability`: central ActivitySources, TraceContext, and OpenTelemetry wiring (ASP.NET/Core, HttpClient, OTLP/console exporters) instrument scheduler, named pipes, orchestrator, workflow steps, RAG pipeline, and task spans; Program boots tracing middleware and projects reference the new module.
+- Schema and skills tightened: prompt schema adds `web_fetch` with fetchPages/maxCharsPerPage; finance/research/strategy/security/shared skills bump versions with stricter data attribution, valuation rules, decision scoring, and study-guide completeness; appsettings refreshes Ollama model lists; tests cover pipe JSON contract, cache expiry fetcher, and WorkflowInstanceStore reverse-deps.
+
 ## Updates (2026-03-09)
 - Finance stock analysis now starts with ticker lookup + json_extract, passes fund name/asset type into stock-data-track, and keeps yahoo_quote_data/stockanalysis_data/search_results as separate vars instead of one lossy blob.
 - Added web_fetch + HTML text extraction: auto-decompress responses, strip boilerplate with AngleSharp, and allow search steps to pull top result page content via fetchPages/maxCharsPerPage.

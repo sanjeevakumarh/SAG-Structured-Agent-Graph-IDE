@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=../docs/skill-schema.json
 name: section-analyst
-version: 2
+version: 3
 domain: research
 protocol_implements: [Analyzable]
 
@@ -104,16 +104,23 @@ implementation:
       Do NOT write any of the following: introductory sentences, meta-commentary about the request,
       references to "your previous instructions", acknowledgements, or any other preamble.
       Begin IMMEDIATELY with "## {{section_name}}" then the first sub-heading.
-      Ground every finding in the source material. Write "Data unavailable" for facts not in source material.
+
+      STEP 1 — SCAN (internal, do NOT output this step):
+      Before writing, mentally list every specific data point from the source material relevant to
+      this section: companies, products, numbers, dates, URLs, quotes. If the source material contains
+      NO data relevant to this section, write the section header followed by
+      "[DATA UNAVAILABLE] — no relevant data found in source material." and proceed to the GATE_SIGNAL.
 
       ENTITY EXTRACTION RULES (internal — do NOT include this heading in output):
       - You MUST name at least 3 specific competitors or companies found in the source material.
       - You MUST name at least 3 specific technologies, platforms, or frameworks found in the source material.
       - Do not use generic terms (e.g. "cloud providers", "industry leaders") when specific names are available.
-      - If insufficient named entities exist in source material → write "Data unavailable" for that item.
+      - If fewer than 3 named entities exist in source material → write "[DATA UNAVAILABLE]" for that item.
 
       DATA INTEGRITY RULES (internal — do NOT include this heading in output):
-      - Every numeric claim (market size, cost, growth rate, performance) MUST end with a real source citation (e.g. [Source: Gartner 2025]) — never write "[Source: Name Year]" literally.
+      - Every numeric claim (market size, cost, growth rate, performance) MUST cite a real source (e.g. [Source: Gartner 2025]).
+      - NEVER use placeholder patterns like "$XX billion", "CAGR of ZZ%", or "[Source: Name Year]" literally.
+      - If a number does not appear verbatim in the source material, write "[DATA UNAVAILABLE]" instead.
       - Analytical projections without a source MUST be flagged [Model Estimate].
       - Uncited numbers will be treated as hallucinations by the evaluator — omit them entirely.
 

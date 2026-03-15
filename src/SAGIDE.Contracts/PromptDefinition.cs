@@ -1,8 +1,8 @@
-namespace SAGIDE.Core.Models;
+namespace SAGIDE.Contracts;
 
 /// <summary>
 /// Deserialized representation of a prompt YAML file.
-/// Fields map 1:1 to the YAML schema defined in ProjectDirection.md.
+/// Fields map 1:1 to the YAML schema.
 /// </summary>
 public class PromptDefinition
 {
@@ -42,19 +42,25 @@ public class PromptDefinition
     public List<PromptOutput> Outputs { get; set; } = [];
 
     /// <summary>
-    /// Phase 5: Named skill instances declared for this workflow.
+    /// Named skill instances declared for this workflow.
     /// Expanded by WorkflowExpander into data_collection steps before execution.
     /// </summary>
     public List<PromptObject> Objects { get; set; } = [];
 
     /// <summary>
-    /// Phase 5: Ordered call sequence that composes skill instances.
+    /// Ordered call sequence that composes skill instances.
     /// Expanded by WorkflowExpander into data_collection steps + subtasks before execution.
     /// </summary>
     public List<PromptWorkflowCall> Workflow { get; set; } = [];
 
-    /// <summary>Absolute path of the YAML file this was loaded from. Set by PromptRegistry.</summary>
+    /// <summary>Absolute path of the YAML file this was loaded from. Null for API-registered prompts.</summary>
     public string? FilePath { get; set; }
+
+    /// <summary>
+    /// Registration source: "file" for filesystem-loaded, "api" for API-registered.
+    /// Used to prevent file-reload from overwriting API-registered definitions.
+    /// </summary>
+    public string Source { get; set; } = "file";
 }
 
 public class PromptModelPreference
@@ -67,7 +73,7 @@ public class PromptModelPreference
 
     public string? Fallback { get; set; }
 
-    /// <summary>Maps subtask name → model spec (e.g. "fundamental" → "ollama/deepseek-r1:14b@mini").</summary>
+    /// <summary>Maps subtask name to model spec (e.g. "fundamental" to "ollama/deepseek-r1:14b@mini").</summary>
     public Dictionary<string, string> Subtasks { get; set; } = [];
 }
 
@@ -120,16 +126,14 @@ public class PromptDataCollectionStep
 
     /// <summary>
     /// When true, an empty <see cref="OutputVar"/> does NOT abort the run.
-    /// Use for search tracks where zero results is a legitimate outcome (e.g. niche topics
-    /// with no comparable companies). A <c>missing_data_summary</c> var is injected into
-    /// the run context so downstream prompts can acknowledge what is unavailable.
+    /// Use for search tracks where zero results is a legitimate outcome.
     /// </summary>
     public bool OptionalOutput { get; set; }
 
     /// <summary>
     /// Number of top search result pages to fetch and extract text from.
     /// 0 (default) = snippet-only. When > 0, actual page content is fetched,
-    /// HTML-stripped, and appended to search results. Typically 1-2 is sufficient.
+    /// HTML-stripped, and appended to search results.
     /// </summary>
     public int FetchPages { get; set; }
 
@@ -139,30 +143,26 @@ public class PromptDataCollectionStep
     public int MaxCharsPerPage { get; set; }
 
     /// <summary>
-    /// Reference to a named skill in the skills/ library (e.g. "research/web-research-track"
-    /// or just "web-research-track" to search all domains). When set, the step's
-    /// <see cref="Type"/> may be omitted — the skill's implementation is expanded at runtime.
+    /// Reference to a named skill in the skill library (e.g. "research/web-research-track").
+    /// When set, the skill's implementation is expanded at runtime.
     /// </summary>
     public string? Skill { get; set; }
 
     /// <summary>
     /// Constructor arguments passed to a skill reference. Merged over the skill's default
-    /// <c>parameters</c> at expansion time; values support Scriban template expressions.
+    /// parameters at expansion time; values support Scriban template expressions.
     /// </summary>
     public Dictionary<string, object> Parameters { get; set; } = [];
 
     /// <summary>
     /// Prompt template for <c>llm_queries</c> steps.
     /// The LLM receives this rendered text and must return a JSON array of search query strings.
-    /// Those queries are then executed via the web search adapter and results are combined.
     /// </summary>
     public string? PlanningPrompt { get; set; }
 
     /// <summary>
     /// Model spec for the planning/analysis LLM call
     /// (e.g. "ollama/qwen2.5:14b@workstation").
-    /// Falls back to <c>model_preference.orchestrator</c> when omitted.
-    /// Supports <c>{{template}}</c> expressions (e.g. "{{model_preference.subtasks.analyst}}").
     /// </summary>
     public string? Model { get; set; }
 
@@ -171,7 +171,7 @@ public class PromptDataCollectionStep
     /// <summary>
     /// Per-section analysis prompt for <c>llm_per_section</c> steps.
     /// Available template variables: <c>{{section_name}}</c>, <c>{{search_results}}</c>,
-    /// plus all regular prompt vars (topic, context, date, etc.).
+    /// plus all regular prompt vars.
     /// </summary>
     public string? SectionAnalysisPrompt { get; set; }
 
@@ -188,8 +188,7 @@ public class PromptDataCollectionStep
 
     /// <summary>
     /// When set on an <c>llm_per_section</c> step with <c>max_sections: "1"</c>, the
-    /// planning LLM call is skipped entirely and this value is used as the single section
-    /// name. Eliminates a wasted LLM round-trip for skills that always produce one section.
+    /// planning LLM call is skipped entirely and this value is used as the single section name.
     /// </summary>
     public string? SectionTitle { get; set; }
 
@@ -197,14 +196,11 @@ public class PromptDataCollectionStep
 
     /// <summary>
     /// Prompt text for a <c>type: llm</c> step. Supports Scriban template expressions.
-    /// The rendered text is submitted as a single LLM task; the result is stored in
-    /// <see cref="OutputVar"/>. Runs synchronously so later steps can reference it.
     /// </summary>
     public string? PromptTemplate { get; set; }
 
     /// <summary>
-    /// Optional list of var names to include in the prompt context for a <c>type: llm</c>
-    /// step. When empty all current vars are available via template expressions.
+    /// Optional list of var names to include in the prompt context for a <c>type: llm</c> step.
     /// </summary>
     public List<string> InputVars { get; set; } = [];
 }
@@ -218,20 +214,16 @@ public class PromptSubtask
     /// <summary>
     /// Model spec string — may contain a template expression such as
     /// <c>{{model_preference.subtasks.fundamental}}</c> that resolves at runtime.
-    /// Format: [provider/]model-id[@machine-name]
     /// </summary>
     public string? Model { get; set; }
 
     /// <summary>
     /// Names of data-collection output vars to include in this subtask's context.
-    /// If empty, all collected vars are passed.
     /// </summary>
     public List<string> InputVars { get; set; } = [];
 
     /// <summary>
     /// Names of other subtasks that must complete before this one is dispatched.
-    /// Completed subtask results are injected into the template vars as <c>{name}_result</c>.
-    /// When empty (default), the subtask runs in the first parallel wave with no prerequisites.
     /// </summary>
     public List<string> DependsOn { get; set; } = [];
 
@@ -239,15 +231,11 @@ public class PromptSubtask
 
     /// <summary>
     /// Variable name under which this subtask's result is stored in the shared vars dict.
-    /// Set from the skill's <c>output_var</c> parameter by WorkflowExpander.
-    /// Falls back to <c>{Name}_result</c> when not set.
     /// </summary>
     public string? OutputVar { get; set; }
 
     /// <summary>
-    /// Skill parameters merged by WorkflowExpander (skill defaults ← object args).
-    /// Injected as <c>parameters</c> into the Scriban rendering context so that
-    /// skill prompt templates can reference <c>{{parameters.required_phases}}</c> etc.
+    /// Skill parameters merged by WorkflowExpander (skill defaults + object args).
     /// </summary>
     public Dictionary<string, object> Parameters { get; set; } = [];
 }
@@ -270,8 +258,7 @@ public class PromptOutput
     public bool Notify { get; set; }
 
     /// <summary>
-    /// For use in <c>outputs:</c> list only. Names a subtask result variable to write
-    /// (e.g. "evaluator_result"). When null, the synthesised output is written instead.
+    /// For use in <c>outputs:</c> list only. Names a subtask result variable to write.
     /// </summary>
     public string? Source { get; set; }
 }

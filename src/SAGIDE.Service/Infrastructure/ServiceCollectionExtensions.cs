@@ -12,6 +12,7 @@ using SAGIDE.Service.Observability;
 using SAGIDE.Service.Orchestrator;
 using SAGIDE.Service.Persistence;
 using SAGIDE.Service.Providers;
+using SAGIDE.Contracts;
 using SAGIDE.Service.Prompts;
 using SAGIDE.Service.Rag;
 using SAGIDE.Service.Resilience;
@@ -241,12 +242,18 @@ public static class ServiceCollectionExtensions
             sp.GetRequiredService<ProviderFactory>(),
             sp.GetRequiredService<EndpointAliasResolver>(),
             sp.GetRequiredService<TaskQueue>(),
-            sp.GetRequiredService<PromptRegistry>(),
+            sp.GetRequiredService<IPromptRegistry>(),
             sp.GetRequiredService<ILogger<QualitySampler>>()));
 
         services.AddSingleton<SubtaskCoordinator>();
+
+        // Registries: concrete singletons + interface aliases for DI consumers
         services.AddSingleton<PromptRegistry>();
+        services.AddSingleton<IPromptRegistry>(sp => sp.GetRequiredService<PromptRegistry>());
+        services.AddSingleton<IPromptRegistrationService>(sp => sp.GetRequiredService<PromptRegistry>());
         services.AddSingleton<SkillRegistry>();
+        services.AddSingleton<ISkillRegistry>(sp => sp.GetRequiredService<SkillRegistry>());
+        services.AddSingleton<ISkillRegistrationService>(sp => sp.GetRequiredService<SkillRegistry>());
         services.AddHostedService<Scheduling.SchedulerService>();
 
         return services;
